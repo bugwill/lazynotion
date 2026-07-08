@@ -16,6 +16,8 @@ import (
 
 const setupHelp = `lazynotion needs at least one Notion integration token.
 
+Run "lazynotion auth" for a guided setup. Or by hand:
+
   1. Create an internal integration at https://www.notion.so/my-integrations
      (capabilities: Read, Update and Insert content)
   2. In Notion, share the pages you want to browse with that integration
@@ -40,6 +42,14 @@ const setupHelp = `lazynotion needs at least one Notion integration token.
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "debug-graphics" {
 		ui.DebugGraphics()
+		return
+	}
+
+	if len(os.Args) > 1 && os.Args[1] == "auth" {
+		if err := runAuth(); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
 		return
 	}
 

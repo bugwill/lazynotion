@@ -14,6 +14,7 @@ require (
 	github.com/rwcarlsen/goexif v0.0.0-20190401172101-9e8deecbddbd
 	golang.org/x/image v0.43.0
 	golang.org/x/sys v0.38.0
+	golang.org/x/term v0.36.0
 	golang.org/x/time v0.15.0
 )
 
@@ -46,6 +47,5 @@ require (
 	github.com/yuin/goldmark v1.7.13 // indirect
 	github.com/yuin/goldmark-emoji v1.0.6 // indirect
 	golang.org/x/net v0.38.0 // indirect
-	golang.org/x/term v0.36.0 // indirect
 	golang.org/x/text v0.38.0 // indirect
 )

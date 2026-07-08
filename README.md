@@ -4,6 +4,19 @@ A lazygit-style TUI for browsing your Notion workspace.
 
 ## Setup
 
+```
+lazynotion auth
+```
+
+walks you through it: it opens Notion's integration dashboard, prompts
+for the token, validates it live, and saves it to the config — run it
+once per workspace. The one manual step Notion requires: share the pages
+you want to browse with the integration (page menu → Connections → your
+integration; sharing a top-level page includes everything nested in it).
+
+<details>
+<summary>Manual setup</summary>
+
 1. Create an internal integration at <https://www.notion.so/my-integrations>
    with the **Read content**, **Update content** and **Insert content**
    capabilities (the last two power to-do toggling and editing)
@@ -30,6 +43,8 @@ token = "ntn_..."
 
 `export NOTION_TOKEN=ntn_...` also works for a quick start and takes
 precedence when set.
+
+</details>
 
 To keep the sidebar to top-level pages only (nested pages are reached by
 navigating into their parents, or via `/` search, which always looks
