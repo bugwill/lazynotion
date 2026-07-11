@@ -4,7 +4,17 @@ A lazygit-style TUI for browsing your Notion workspace.
 
 ## Install
 
-With [Go](https://go.dev/dl/) 1.25 or newer:
+Homebrew (macOS or Linux):
+
+```sh
+brew install justinm35/tap/lazynotion
+```
+
+Or grab a prebuilt binary from the
+[releases page](https://github.com/justinm35/lazynotion/releases)
+(darwin/linux, amd64/arm64).
+
+Or with [Go](https://go.dev/dl/) 1.25 or newer:
 
 ```sh
 go install github.com/justinm35/lazynotion/cmd/lazynotion@latest
