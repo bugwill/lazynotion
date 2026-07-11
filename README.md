@@ -2,6 +2,25 @@
 
 A lazygit-style TUI for browsing your Notion workspace.
 
+## Install
+
+With [Go](https://go.dev/dl/) 1.25 or newer:
+
+```sh
+go install github.com/justinm35/lazynotion/cmd/lazynotion@latest
+```
+
+This drops a `lazynotion` binary into `$(go env GOPATH)/bin` (usually
+`~/go/bin`) — make sure that's on your `PATH`. Or run from a clone:
+
+```sh
+git clone https://github.com/justinm35/lazynotion
+cd lazynotion && go run ./cmd/lazynotion
+```
+
+Works on macOS and Linux, in any modern terminal (kitty and Ghostty get
+pixel-perfect images; everything else gets a good fallback).
+
 ## Setup
 
 ```
@@ -60,8 +79,11 @@ integration can only be reached through search.
 ## Run
 
 ```sh
-go run ./cmd/lazynotion
+lazynotion
 ```
+
+`lazynotion auth` connects a workspace (see Setup above); after that,
+plain `lazynotion` starts the TUI.
 
 ## Keys
 
@@ -182,4 +204,5 @@ refetch. Delete the cache directory any time — it rebuilds itself.
 - [x] M4 — inline images (truecolor half-block mosaic, works in any modern terminal)
 - [x] M3 — child-page navigation, disk cache + prefetching (database lists still open)
 - [x] M4b — pixel-perfect images on kitty/Ghostty (unicode placeholders)
-- [ ] M5 — theming, help overlay
+- [x] M5 — theming, help overlay, guided auth (`lazynotion auth`)
+- [ ] M6 — databases: browse, sort, and edit rows
