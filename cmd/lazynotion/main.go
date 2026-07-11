@@ -39,7 +39,15 @@ Run "lazynotion auth" for a guided setup. Or by hand:
      (or export NOTION_TOKEN=ntn_... for a quick start)
 `
 
+// version is stamped by goreleaser at release time.
+var version = "dev"
+
 func main() {
+	if len(os.Args) > 1 && (os.Args[1] == "--version" || os.Args[1] == "version") {
+		fmt.Println("lazynotion", version)
+		return
+	}
+
 	if len(os.Args) > 1 && os.Args[1] == "debug-graphics" {
 		ui.DebugGraphics()
 		return

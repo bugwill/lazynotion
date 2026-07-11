@@ -1,0 +1,50 @@
+version: 2
+
+project_name: lazynotion
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - main: ./cmd/lazynotion
+    env:
+      - CGO_ENABLED=0
+    # No windows: the TTY handling (/dev/tty, unix ioctls) is unix-only.
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
+archives:
+  - formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^ci:"
+      - "^README"
+
+# The deprecated-but-kept formula (not a cask) so Homebrew on Linux works too.
+brews:
+  - repository:
+      owner: justinm35
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    homepage: https://github.com/justinm35/lazynotion
+    description: A lazygit-style terminal UI for Notion
+    license: MIT
+    test: |
+      system "#{bin}/lazynotion", "--version"
