@@ -8,6 +8,8 @@ import (
 	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/justinm35/lazynotion/internal/notion"
 )
 
 var (
@@ -43,7 +45,11 @@ func (pageDelegate) Render(w io.Writer, m list.Model, index int, item list.Item)
 	}
 
 	title := truncateText(it.page.Title, width-2)
-	desc := truncateText("edited "+relTime(it.page.LastEdited), width-2)
+	edited := "edited " + relTime(it.page.LastEdited)
+	if it.page.Kind == notion.KindDataSource {
+		edited = "database · " + edited
+	}
+	desc := truncateText(edited, width-2)
 
 	fmt.Fprintf(w, "%s%s\n%s%s",
 		bar, titleStyle.Render(title),

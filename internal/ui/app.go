@@ -86,11 +86,13 @@ type pageCreatedMsg struct {
 }
 
 // historyEntry remembers where the reader was when drilling into a
-// sub-page, so esc returns to the same block and scroll position.
+// sub-page, so esc returns to the same block and scroll position. Entries
+// with db set restore a database grid instead (cursor and rows intact).
 type historyEntry struct {
 	page   notion.Page
 	cursor int
 	offset int
+	db     *dbState
 }
 
 type cursorRestore struct {
@@ -139,6 +141,7 @@ type Model struct {
 	pageLoading    bool
 	lastQuery      string
 	selected       *notion.Page
+	db             *dbState // non-nil: the viewer shows a database grid
 	defaultPages   []notion.Page
 	renderedID     string
 	history        []historyEntry
@@ -223,6 +226,7 @@ func (m Model) switchWorkspace() (tea.Model, tea.Cmd) {
 	ws := m.workspaces[m.wsIndex]
 	m.client = ws.Client
 	m.selected = nil
+	m.db = nil
 	m.history = nil
 	m.renderedID = ""
 	m.pv = pageView{}
@@ -519,6 +523,12 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case memMsg:
 		m.memUsage = formatBytes(msg.heapBytes)
 		return m, nextMemTick()
+
+	case dbLoadedMsg:
+		return m.handleDBLoaded(msg)
+
+	case dbRowsMsg:
+		return m.handleDBRows(msg)
 
 	case moveDoneMsg:
 		return m.handleMoveDone(msg)
@@ -1343,7 +1353,7 @@ func (m Model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "q", "ctrl+c":
 		return m, tea.Quit
 	case "/":
-		if m.focus == focusViewer && m.selected != nil {
+		if m.focus == focusViewer && m.selected != nil && m.db == nil {
 			return m.startInput(inputFind, "find in page: ", m.findQuery)
 		}
 		return m.startInput(inputSearch, "search: ", "")
@@ -1366,7 +1376,7 @@ func (m Model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.rebuildPage(false)
 		return m, nil
 	case "esc":
-		if m.visualAnchor >= 0 {
+		if m.visualAnchor >= 0 && m.db == nil {
 			m.visualAnchor = -1
 			m.statusMsg = ""
 			m.syncViewer()
@@ -1375,6 +1385,14 @@ func (m Model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.focus == focusViewer && len(m.history) > 0 {
 			entry := m.history[len(m.history)-1]
 			m.history = m.history[:len(m.history)-1]
+			if entry.db != nil {
+				// back into a database grid, exactly as it was left
+				m.db = entry.db
+				m.selected = &entry.db.ref
+				m.pendingRestore = nil
+				return m, nil
+			}
+			m.db = nil
 			next, cmd := m.openPage(entry.page)
 			model := next.(Model)
 			model.pendingRestore = &cursorRestore{
@@ -1390,6 +1408,9 @@ func (m Model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "r":
 		m.err = nil
+		if m.focus == focusViewer && m.db != nil {
+			return m.refreshDatabaseView()
+		}
 		// viewer: refresh just the current page, straight past all caches
 		if m.focus == focusViewer && m.selected != nil {
 			delete(m.blockCache, m.selected.ID)
@@ -1418,6 +1439,10 @@ func (m Model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.focus == focusSidebar {
 			return m.startNewPageInput()
 		}
+		if m.db != nil {
+			m.statusMsg = "database view is read-only for now — enter opens the row"
+			return m, nil
+		}
 		return m.newBlockBelow()
 	case "w":
 		if m.focus == focusSidebar {
@@ -1427,7 +1452,7 @@ func (m Model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.showHelp = true
 		return m, nil
 	case "v":
-		if m.focus == focusViewer && m.selected != nil && len(m.pv.units) > 0 {
+		if m.focus == focusViewer && m.selected != nil && m.db == nil && len(m.pv.units) > 0 {
 			if m.visualAnchor >= 0 {
 				m.visualAnchor = -1
 				m.statusMsg = ""
@@ -1448,6 +1473,9 @@ func (m Model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.selected == nil {
 			return m, nil
 		}
+		if m.db != nil {
+			return m, copyCmd(m.selected.URL, "database link copied")
+		}
 		text, count := m.yankSelection()
 		m.visualAnchor = -1
 		m.syncViewer()
@@ -1460,13 +1488,16 @@ func (m Model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, copyCmd(text, label)
 	case "I":
-		if m.focus == focusViewer && m.selected != nil {
+		if m.focus == focusViewer && m.selected != nil && m.db == nil {
 			return m.startInput(inputIcon, `page icon (emoji or "name color"): `, "")
 		}
 		return m, nil
 	case "Y":
 		if m.focus != focusViewer || m.selected == nil {
 			return m, nil
+		}
+		if m.db != nil {
+			return m, copyCmd(m.selected.URL, "database link copied")
 		}
 		if unit, ok := m.pv.current(); ok && unit.ID() != draftBlockID && !isPendingID(unit.ID()) {
 			return m, copyCmd(blockLink(m.selected.URL, unit.ID()), "block link copied")
@@ -1476,10 +1507,16 @@ func (m Model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.focus == focusSidebar {
 			return m.openSelectedPage()
 		}
+		if m.db != nil {
+			return m.openDBRow()
+		}
 		return m.openChildPage()
 	}
 
 	if m.focus == focusViewer {
+		if m.db != nil {
+			return m.updateDBKeys(msg)
+		}
 		return m.updateViewerKeys(msg)
 	}
 	var cmd tea.Cmd
@@ -1551,6 +1588,10 @@ func (m Model) startNewPageInput() (tea.Model, tea.Cmd) {
 		m.statusMsg = "highlight a parent page first — the API can't create workspace-root pages"
 		return m, nil
 	}
+	if item.page.Kind == notion.KindDataSource {
+		m.statusMsg = "creating database rows isn't supported yet"
+		return m, nil
+	}
 	parent := item.page
 	m.newPageParent = &parent
 	return m.startInput(inputNewPage, fmt.Sprintf("new page under %q: ", parent.Title), "")
@@ -1593,6 +1634,11 @@ func (m Model) openSelectedPage() (tea.Model, tea.Cmd) {
 		restore = tea.Batch(restore, m.loadPages(""))
 	}
 
+	if item.page.Kind == notion.KindDataSource {
+		next, cmd := m.openDatabaseView(item.page)
+		model := next.(Model)
+		return model, tea.Batch(cmd, restore)
+	}
 	next, cmd := m.openPage(item.page)
 	model := next.(Model)
 	return model, tea.Batch(cmd, restore)
@@ -1610,6 +1656,22 @@ func (m Model) openChildPage() (tea.Model, tea.Cmd) {
 		m.rebuildPage(true)
 		m.cursorToBlock(id)
 		return m, nil
+	}
+	if dbID, dbTitle, isDB := unit.DatabaseRef(); isDB {
+		if dbTitle == "" {
+			dbTitle = "Untitled"
+		}
+		ref := notion.Page{
+			ID:    dbID,
+			Title: dbTitle,
+			URL:   "https://www.notion.so/" + strings.ReplaceAll(dbID, "-", ""),
+		}
+		m.history = append(m.history, historyEntry{
+			page:   *m.selected,
+			cursor: m.pv.cursor,
+			offset: m.viewer.YOffset,
+		})
+		return m.openDatabaseView(ref)
 	}
 	id, title, isRef := unit.PageRef()
 	if !isRef {
@@ -1635,6 +1697,7 @@ func (m Model) openChildPage() (tea.Model, tea.Cmd) {
 
 func (m Model) openPage(page notion.Page) (tea.Model, tea.Cmd) {
 	m.pendingRestore = nil
+	m.db = nil
 	m.selected = &page
 	m.focus = focusViewer
 	m.pv.cursor = 0

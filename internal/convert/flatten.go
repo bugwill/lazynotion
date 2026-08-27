@@ -92,6 +92,15 @@ func (u Unit) PageRef() (pageID, title string, ok bool) {
 	return "", "", false
 }
 
+// DatabaseRef resolves blocks that point at a database: a child_database
+// block's ID is the database ID.
+func (u Unit) DatabaseRef() (databaseID, title string, ok bool) {
+	if db, isDB := u.Node.Block.(*notionapi.ChildDatabaseBlock); isDB {
+		return u.ID(), db.ChildDatabase.Title, true
+	}
+	return "", "", false
+}
+
 func (u Unit) IsToDo() (checked bool, ok bool) {
 	if todo, isTodo := u.Node.Block.(*notionapi.ToDoBlock); isTodo {
 		return todo.ToDo.Checked, true

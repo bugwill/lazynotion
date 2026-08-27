@@ -39,6 +39,7 @@ var (
 const (
 	sidebarHelp = "j/k move · enter open · n new page · w workspace · / search · ? help · q quit"
 	viewerHelp  = "j/k blocks · enter fold/open · i edit · n/N new · d delete · u undo · / find · esc back · ? help"
+	dbHelp      = "j/k rows · h/l columns · enter open row · y copy link · r refresh · esc back · ? help"
 )
 
 func (m Model) View() string {
@@ -140,6 +141,9 @@ func withBorderTitle(box, title string, focused bool) string {
 }
 
 func (m Model) viewerContent() string {
+	if m.db != nil {
+		return m.dbGridView()
+	}
 	var hint string
 	switch {
 	case m.selected == nil:
@@ -178,6 +182,8 @@ func (m Model) statusLine() string {
 		return errStyle.Render("error: " + m.err.Error())
 	case m.statusMsg != "":
 		return statusStyle.Render(m.statusMsg)
+	case m.focus == focusViewer && m.db != nil:
+		return statusStyle.Render(dbHelp)
 	case m.focus == focusViewer:
 		return statusStyle.Render(viewerHelp)
 	default:

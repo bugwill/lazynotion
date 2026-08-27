@@ -21,6 +21,14 @@ const maxSearchResults = 100
 // apiBase is a var so tests can point the raw client at a fixture server.
 var apiBase = "https://api.notion.com/v1"
 
+// PageKind distinguishes what a sidebar entry opens as.
+type PageKind string
+
+const (
+	KindPage       PageKind = ""            // a regular page
+	KindDataSource PageKind = "data_source" // a database's data source (table)
+)
+
 type Page struct {
 	ID         string
 	Title      string
@@ -28,6 +36,9 @@ type Page struct {
 	Cover      string
 	URL        string
 	LastEdited time.Time
+	Kind       PageKind
+	// DatabaseID is the containing database for data-source entries.
+	DatabaseID string
 }
 
 type Client struct {
@@ -45,9 +56,22 @@ func NewClient(token string) *Client {
 	}
 }
 
+// API versions in play: pages/blocks stay on the version the client library
+// speaks; data sources (databases) only exist from 2025-09-03 onward. The
+// header is per-request, so the two coexist.
+const (
+	versionBlocks      = "2022-06-28"
+	versionDataSources = "2025-09-03"
+)
+
 // rawRequest performs a direct API call for the endpoints where the client
 // library loses information (search icons) or lacks support (restore).
 func (c *Client) rawRequest(ctx context.Context, method, path string, body []byte) ([]byte, error) {
+	return c.rawRequestV(ctx, method, path, body, versionBlocks)
+}
+
+// rawRequestV is rawRequest with an explicit Notion-Version header.
+func (c *Client) rawRequestV(ctx context.Context, method, path string, body []byte, version string) ([]byte, error) {
 	if err := c.limiter.Wait(ctx); err != nil {
 		return nil, err
 	}
@@ -60,7 +84,7 @@ func (c *Client) rawRequest(ctx context.Context, method, path string, body []byt
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
-	req.Header.Set("Notion-Version", "2022-06-28")
+	req.Header.Set("Notion-Version", version)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -92,8 +116,12 @@ type rawPage struct {
 		} `json:"file"`
 	} `json:"cover"`
 	Parent struct {
-		Type string `json:"type"`
+		Type       string `json:"type"`
+		DatabaseID string `json:"database_id"`
 	} `json:"parent"`
+	// TitleRT is the top-level title array data sources carry (pages keep
+	// theirs inside properties).
+	TitleRT    []rawRichText `json:"title"`
 	Properties map[string]struct {
 		Type  string `json:"type"`
 		Title []struct {
@@ -116,6 +144,9 @@ func (p rawPage) coverURL() string {
 }
 
 func (p rawPage) title() string {
+	if s := strings.TrimSpace(joinPlain(p.TitleRT)); s != "" {
+		return s
+	}
 	for _, prop := range p.Properties {
 		if prop.Type != "title" {
 			continue
@@ -137,27 +168,23 @@ type rawSearchResponse struct {
 	NextCursor string    `json:"next_cursor"`
 }
 
+// rawSearch runs unfiltered under the data-sources API version, so one
+// request returns pages and data sources (databases) together.
 func (c *Client) rawSearch(ctx context.Context, query, cursor string, pageSize int) (*rawSearchResponse, error) {
-	body, err := json.Marshal(map[string]any{
-		"query":        query,
-		"page_size":    pageSize,
-		"filter":       map[string]string{"value": "page", "property": "object"},
-		"sort":         map[string]string{"direction": "descending", "timestamp": "last_edited_time"},
-		"start_cursor": cursor,
-	})
+	req := map[string]any{
+		"query":     query,
+		"page_size": pageSize,
+		"sort":      map[string]string{"direction": "descending", "timestamp": "last_edited_time"},
+	}
+	if cursor != "" {
+		// the API rejects an empty start_cursor
+		req["start_cursor"] = cursor
+	}
+	body, err := json.Marshal(req)
 	if err != nil {
 		return nil, err
 	}
-	if cursor == "" {
-		// the API rejects an empty start_cursor
-		body, _ = json.Marshal(map[string]any{
-			"query":     query,
-			"page_size": pageSize,
-			"filter":    map[string]string{"value": "page", "property": "object"},
-			"sort":      map[string]string{"direction": "descending", "timestamp": "last_edited_time"},
-		})
-	}
-	data, err := c.rawRequest(ctx, http.MethodPost, "/search", body)
+	data, err := c.rawRequestV(ctx, http.MethodPost, "/search", body, versionDataSources)
 	if err != nil {
 		return nil, err
 	}
@@ -201,20 +228,31 @@ func (c *Client) Search(ctx context.Context, query string, rootOnly bool) ([]Pag
 		}
 		for _, p := range resp.Results {
 			scanned++
-			if p.Object != "page" {
-				continue
-			}
-			if rootOnly && p.Parent.Type != "workspace" {
-				continue
-			}
-			pages = append(pages, Page{
+			page := Page{
 				ID:         p.ID,
 				Title:      p.title(),
 				Icon:       icons.FromRaw(p.Icon),
 				Cover:      p.coverURL(),
 				URL:        p.URL,
 				LastEdited: p.LastEditedTime,
-			})
+			}
+			switch p.Object {
+			case "page":
+				if rootOnly && p.Parent.Type != "workspace" {
+					continue
+				}
+			case "data_source":
+				// data sources always show: their parent is the database,
+				// so the workspace-root test can't apply to them
+				page.Kind = KindDataSource
+				page.DatabaseID = p.Parent.DatabaseID
+				if page.URL == "" && page.DatabaseID != "" {
+					page.URL = "https://www.notion.so/" + strings.ReplaceAll(page.DatabaseID, "-", "")
+				}
+			default:
+				continue
+			}
+			pages = append(pages, page)
 		}
 		if !resp.HasMore || len(pages) >= maxSearchResults || scanned >= maxSearchScan {
 			break

@@ -40,6 +40,15 @@ const searchFixture = `{
       "icon": null,
       "parent": {"type": "page_id", "page_id": "page-1"},
       "properties": {}
+    },
+    {
+      "object": "data_source",
+      "id": "ds-1",
+      "url": "",
+      "last_edited_time": "2026-07-01T07:00:00.000Z",
+      "icon": {"type": "emoji", "emoji": "📋"},
+      "parent": {"type": "database_id", "database_id": "db-1"},
+      "title": [{"plain_text": "Tasks"}]
     }
   ],
   "has_more": false,
@@ -65,8 +74,8 @@ func TestSearchParsesRawPages(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(pages) != 3 {
-		t.Fatalf("got %d pages, want 3", len(pages))
+	if len(pages) != 4 {
+		t.Fatalf("got %d pages, want 4", len(pages))
 	}
 	if pages[0].Title != "Projects" || pages[0].Icon.Name != "clipboard" || pages[0].Icon.Color != "gray" {
 		t.Errorf("page 1 = %+v", pages[0])
@@ -76,6 +85,13 @@ func TestSearchParsesRawPages(t *testing.T) {
 	}
 	if pages[2].Title != "Untitled" || !pages[2].Icon.IsZero() {
 		t.Errorf("page 3 = %+v", pages[2])
+	}
+	ds := pages[3]
+	if ds.Kind != KindDataSource || ds.Title != "Tasks" || ds.DatabaseID != "db-1" {
+		t.Errorf("data source = %+v", ds)
+	}
+	if ds.URL != "https://www.notion.so/db1" {
+		t.Errorf("data source url = %q", ds.URL)
 	}
 }
 
@@ -92,7 +108,9 @@ func TestSearchRootOnlyFiltersNestedPages(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(pages) != 1 || pages[0].ID != "page-1" {
-		t.Fatalf("root-only should keep just the workspace-level page, got %+v", pages)
+	// nested pages drop out; data sources stay (their parent is always the
+	// database, so the workspace-root test can't apply to them)
+	if len(pages) != 2 || pages[0].ID != "page-1" || pages[1].ID != "ds-1" {
+		t.Fatalf("root-only should keep the workspace-level page and the data source, got %+v", pages)
 	}
 }
