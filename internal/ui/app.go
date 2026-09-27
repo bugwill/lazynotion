@@ -35,6 +35,7 @@ const (
 	inputNewPage
 	inputFind
 	inputIcon
+	inputTitle
 )
 
 // Workspace pairs a display name with its own API client (each token gets
@@ -409,6 +410,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.MouseMsg:
+		if m.titleClicked(msg) {
+			return m.startTitleEdit()
+		}
 		if m.editing && !m.showHelp && !m.paletteOpen && m.confirm == nil && m.mode == inputNone {
 			return m.updateEditorMouse(msg)
 		}
@@ -474,10 +478,17 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleQueryEvent(msg)
 
 	case tea.WindowSizeMsg:
+		if msg.Width <= 0 || msg.Height <= 0 || msg.Width == m.width && msg.Height == m.height {
+			return m, nil
+		}
+		anchor := m.captureResizeAnchor()
 		m.readPending = nil
 		m.width, m.height = msg.Width, msg.Height
 		m.layout()
 		m.rebuildPage(true)
+		if !m.editing {
+			m.restoreResizeAnchor(anchor)
+		}
 		if m.editing {
 			if unit, ok := m.pv.current(); ok {
 				m.editArea.SetWidth(max(m.viewer.Width-gutterWidth-2*unit.Depth, 20))
@@ -637,6 +648,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case titleSavedMsg:
+		return m.handleTitleSaved(msg)
+
 	case writeErrMsg:
 		m.writesInFlight = max(m.writesInFlight-1, 0)
 		m.err = msg.err
@@ -763,6 +777,8 @@ func (m Model) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m Model) submitInput(mode inputMode, value string) (tea.Model, tea.Cmd) {
 	switch mode {
+	case inputTitle:
+		return m.saveTitle(value)
 	case inputSearch:
 		m.selected = nil
 		m.db = nil
@@ -1818,9 +1834,14 @@ func (m Model) startNewPageInput() (tea.Model, tea.Cmd) {
 
 func (m Model) startInput(mode inputMode, prompt, value string) (tea.Model, tea.Cmd) {
 	m.mode = mode
+	m.configureInputCursor(mode)
 	m.input.Prompt = prompt
 	m.input.SetValue(value)
-	m.input.CursorEnd()
+	if mode == inputTitle {
+		m.input.CursorStart()
+	} else {
+		m.input.CursorEnd()
+	}
 	return m, m.input.Focus()
 }
 

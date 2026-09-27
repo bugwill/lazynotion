@@ -165,6 +165,8 @@ func (m Model) statusLine() string {
 			prompt += " (" + m.confirm.warning + ")"
 		}
 		return confirmStyle.Render(prompt + " y/n")
+	case m.mode == inputTitle:
+		return m.titleInputView()
 	case m.mode != inputNone:
 		return m.input.View()
 	case m.loading:

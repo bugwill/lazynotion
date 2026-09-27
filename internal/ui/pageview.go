@@ -386,7 +386,8 @@ func (cjkEmphasisParser) Parse(parent ast.Node, block text.Reader, pc parser.Con
 	if isCJKEmphasisRune(before) && unicode.IsPunct(after) {
 		delimiter.CanOpen = true
 	}
-	if unicode.IsPunct(before) && isCJKEmphasisRune(after) {
+	if unicode.IsPunct(before) && (isCJKEmphasisRune(after) ||
+		isCJKEmphasisPunctuation(before) && (unicode.IsLetter(after) || unicode.IsDigit(after))) {
 		delimiter.CanClose = true
 	}
 	delimiter.Segment = segment.WithStop(segment.Start + delimiter.OriginalLength)
@@ -408,4 +409,10 @@ func isCJKEmphasisRune(r rune) bool {
 		unicode.Is(unicode.Hiragana, r) ||
 		unicode.Is(unicode.Katakana, r) ||
 		unicode.Is(unicode.Hangul, r)
+}
+
+// Chinese punctuation also ends formatted spans followed by Latin names or
+// numbers, which are common in mixed-language Notion paragraphs.
+func isCJKEmphasisPunctuation(r rune) bool {
+	return unicode.IsPunct(r) && (r >= 0x3000 && r <= 0x303f || r >= 0xff00 && r <= 0xffef)
 }

@@ -169,6 +169,7 @@ plain `lazynotion` starts the TUI.
 | `I` | set the page icon: an emoji (`🎯`) or a Notion built-in (`target red`) |
 | `ctrl+o` | open page in browser |
 | mouse wheel | scroll the visible list or page |
+| click page title | rename the page; Enter saves, Esc cancels |
 | mouse press / drag | select a word / text range while reading (Whip: long-press, then drag) |
 | `b` with selected reading text | make the selected text bold and save automatically |
 | `q` / `ctrl+c` | quit outside the inline editor |

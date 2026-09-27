@@ -29,6 +29,14 @@ func TestCJKBoldMarkdownRendersExactStrongSpan(t *testing.T) {
 			want: "**中文：**后文",
 		},
 		{
+			name: "Chinese punctuation before Latin continuation",
+			runs: []notionapi.RichText{
+				{PlainText: "AI实验室准备工具。", Annotations: bold},
+				{PlainText: "Amazon 支持服务。"},
+			},
+			want: "**AI实验室准备工具。**Amazon 支持服务。",
+		},
+		{
 			name: "adjacent API fragments with the same style",
 			runs: []notionapi.RichText{
 				{PlainText: "中", Annotations: bold},
