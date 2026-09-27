@@ -126,8 +126,7 @@ func (m Model) pageQueryFooter() string {
 		filled = clamp(p.Done*barWidth/p.Total, 0, barWidth)
 		return queryBlue.Render(label+" "+strings.Repeat("━", filled)) + pageMetaStyle.Render(strings.Repeat("─", barWidth-filled))
 	}
-	position := m.pulseFrame % barWidth
-	return queryBlue.Render(label+" ") + pageMetaStyle.Render(strings.Repeat("─", position)) + queryBlue.Render("━") + pageMetaStyle.Render(strings.Repeat("─", barWidth-position-1))
+	return queryBlue.Render("同步中")
 }
 
 func queryProgressLabel(p notion.QueryProgress) string {
@@ -173,10 +172,9 @@ func (m Model) sidebarContent() string {
 	if p.Total > 0 {
 		bar = queryBlue.Render(strings.Repeat("━", filled)) + pageMetaStyle.Render(strings.Repeat("─", width-filled))
 	} else {
-		// Pagination has no known total: animate instead of inventing a percent.
-		segment := min(4, width)
-		start := m.pulseFrame % max(width-segment+1, 1)
-		bar = pageMetaStyle.Render(strings.Repeat("─", start)) + queryBlue.Render(strings.Repeat("━", segment)) + pageMetaStyle.Render(strings.Repeat("─", width-start-segment))
+		// Unknown totals use a static status instead of an animated bar.
+		label = "同步中"
+		bar = pageMetaStyle.Render(strings.Repeat("─", width))
 	}
 	return body + "\n" + queryBlue.Render(truncateText(label, width)) + "\n" + bar
 }

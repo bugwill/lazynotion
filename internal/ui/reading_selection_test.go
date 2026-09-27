@@ -21,7 +21,7 @@ import (
 
 func readingTestModel(t *testing.T, text string) Model {
 	m := commitTestModel(t, para("text", text).Block)
-	m.loading, m.pageLoading, m.pulsing = false, false, true
+	m.loading, m.pageLoading = false, false
 	m.focus = focusViewer
 	m.layout()
 	m.rebuildPage(true)

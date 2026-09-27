@@ -176,14 +176,11 @@ type Model struct {
 	moveQueue      []moveOp
 	moveSyncing    bool
 	writesInFlight int
-	pulsing        bool
-	pulseFrame     int
 	pendingSeq     int
 	findQuery      string
 	paletteOpen    bool
 	paletteQuery   string
 	paletteIndex   int
-	memUsage       string
 	statusMsg      string
 	err            error
 	width          int
@@ -278,7 +275,7 @@ func (m Model) switchWorkspace() (tea.Model, tea.Cmd) {
 }
 
 func (m Model) Init() tea.Cmd {
-	cmds := []tea.Cmd{m.loadPages(""), func() tea.Msg { return measureMem() }}
+	cmds := []tea.Cmd{m.loadPages("")}
 	if m.recent != nil {
 		cmds = append(cmds, m.loadRecent(false))
 	}
@@ -393,8 +390,7 @@ func (m Model) prefetchChildren(blocks []notion.BlockNode) tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
-// Update wraps update to keep the sync pulse alive: whenever a message
-// leaves the model in a syncing state, the animation ticker is (re)armed.
+// Update keeps reading selections consistent with the current page.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	next, cmd := m.update(msg)
 	model, ok := next.(Model)
@@ -406,10 +402,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	if model.readPending != nil && (model.selected == nil || model.selected.ID != model.readPending.pageID || model.editing || model.db != nil || model.recent != nil) {
 		model.readPending = nil
-	}
-	if model.syncing() && !model.pulsing {
-		model.pulsing = true
-		return model, tea.Batch(cmd, nextPulseTick())
 	}
 	return model, cmd
 }
@@ -480,13 +472,6 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case queryEvent:
 		return m.handleQueryEvent(msg)
-	case pulseMsg:
-		if !m.syncing() {
-			m.pulsing = false
-			return m, nil
-		}
-		m.pulseFrame++
-		return m, nextPulseTick()
 
 	case tea.WindowSizeMsg:
 		m.readPending = nil
@@ -680,11 +665,6 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		next, openCmd := m.openPage(msg.page)
 		model := next.(Model)
 		return model, tea.Batch(openCmd, model.loadPages(model.lastQuery))
-
-	case memMsg:
-		m.memUsage = formatBytes(msg.heapBytes)
-		return m, nextMemTick()
-
 	case dbLoadedMsg:
 		return m.handleDBLoaded(msg)
 

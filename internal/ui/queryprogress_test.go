@@ -28,7 +28,7 @@ func TestProgressStaysAtSidebarBottomAndClearsOnCompletion(t *testing.T) {
 		t.Fatal("bar must fit sidebar width")
 	}
 	if !m.syncing() {
-		t.Fatal("background query must keep the animation alive")
+		t.Fatal("background query must show the sync status")
 	}
 	event.start = false
 	event.payload = recentMsg{}
@@ -100,5 +100,19 @@ func TestOldWorkspaceStreamIsDrained(t *testing.T) {
 	}
 	if m.err != nil || m.recentQuery != nil {
 		t.Fatal("old workspace messages must not alter current UI")
+	}
+}
+
+func TestUnknownProgressUsesStaticSyncStatus(t *testing.T) {
+	m := New([]Workspace{{Name: "test"}}, 0, nil, "mosaic")
+	m.width, m.height = 90, 30
+	m.layout()
+	m.pagesQuery = &queryState{progress: notion.QueryProgress{Stage: "search"}}
+	if !strings.Contains(stripAnsi(m.sidebarContent()), "同步中") {
+		t.Fatal("unknown sidebar progress must show static sync status")
+	}
+	m.selected = &notion.Page{ID: "page", Title: "Page"}
+	if got := stripAnsi(m.pageQueryFooter()); got != "同步中" {
+		t.Fatalf("unknown page progress = %q", got)
 	}
 }

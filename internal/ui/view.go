@@ -72,16 +72,12 @@ func (m Model) View() string {
 	return lipgloss.JoinVertical(lipgloss.Left, viewer, footer)
 }
 
-// footerLine right-aligns the sync indicator and memory readout.
+// footerLine shows a static sync status without periodic UI updates.
 func (m Model) footerLine() string {
 	left := m.statusLine()
 	right := ""
 	if m.syncing() {
-		shade := pulseShades[m.pulseFrame%len(pulseShades)]
-		right = lipgloss.NewStyle().Foreground(lipgloss.Color(shade)).Render("⇅") + " "
-	}
-	if m.memUsage != "" || right != "" {
-		right = right + statusStyle.Render(m.memUsage)
+		right = statusStyle.Render("同步中")
 	}
 	if right == "" {
 		return ansi.Truncate(left, max(m.width, 0), "…")
@@ -89,7 +85,7 @@ func (m Model) footerLine() string {
 	right = lipgloss.NewStyle().Render(right)
 	gap := m.width - lipgloss.Width(left) - lipgloss.Width(right)
 	if gap < 1 {
-		// the sync/memory readout outranks the tail of the help text
+		// the sync status outranks the tail of the help text
 		left = ansi.Truncate(left, max(m.width-lipgloss.Width(right)-1, 0), "…")
 		gap = max(m.width-lipgloss.Width(left)-lipgloss.Width(right), 1)
 	}

@@ -28,8 +28,8 @@ func TestPageKeepsQueryProgressWithPagesHidden(t *testing.T) {
 func TestFooterFitsNarrowTerminalDuringEditing(t *testing.T) {
 	m := New([]Workspace{{Name: "fixture"}}, 0, nil, "mosaic")
 	m.width, m.height, m.loading, m.editing = 37, 24, false, true
-	for _, memory := range []string{"", "12 MB"} {
-		m.memUsage = memory
+	for _, syncing := range []bool{false, true} {
+		m.moveSyncing = syncing
 		line := m.footerLine()
 		if strings.Contains(line, "\n") || lipgloss.Width(line) > m.width {
 			t.Fatalf("footer wrapped outside one reserved row: %q", line)

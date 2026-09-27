@@ -32,8 +32,8 @@ func TestSyncIndicatorLifecycle(t *testing.T) {
 		t.Fatal("in-flight write should report syncing")
 	}
 	footer := stripAnsi(m.footerLine())
-	if !strings.Contains(footer, "⇅") {
-		t.Errorf("footer should show the sync glyph: %q", footer)
+	if !strings.Contains(footer, "同步中") {
+		t.Errorf("footer should show the static sync status: %q", footer)
 	}
 
 	// completion releases it
@@ -42,8 +42,8 @@ func TestSyncIndicatorLifecycle(t *testing.T) {
 	if m.syncing() {
 		t.Error("completed write should clear the indicator")
 	}
-	if strings.Contains(stripAnsi(m.footerLine()), "⇅") {
-		t.Error("footer should drop the glyph when idle")
+	if strings.Contains(stripAnsi(m.footerLine()), "同步中") {
+		t.Error("footer should drop the sync status when idle")
 	}
 
 	// error paths release it too
@@ -72,43 +72,23 @@ func TestSyncIndicatorCoversQueueAndLoads(t *testing.T) {
 	}
 }
 
-func TestPulseTicksOnlyWhileSyncing(t *testing.T) {
+func TestSyncStatusDoesNotScheduleAnimation(t *testing.T) {
 	m := commitTestModel(t, nil)
 	m.loading = false
-
-	// syncing: pulse advances and rearms
 	m.writesInFlight = 1
-	m.pulsing = true
-	next, cmd := m.Update(pulseMsg{})
+	next, cmd := m.Update(struct{}{})
 	m = next.(Model)
-	if cmd == nil || m.pulseFrame != 1 {
-		t.Errorf("pulse should advance and rearm while syncing (frame=%d)", m.pulseFrame)
-	}
-
-	// idle: pulse stops, no further ticks
-	m.writesInFlight = 0
-	next, cmd = m.Update(pulseMsg{})
-	m = next.(Model)
-	if m.pulsing {
-		t.Error("pulse should stop when idle")
-	}
 	if cmd != nil {
-		t.Error("no tick should be scheduled when idle")
+		t.Fatal("sync status must not schedule periodic commands")
+	}
+	first := m.footerLine()
+	if !strings.Contains(stripAnsi(first), "同步中") {
+		t.Fatal("sync status missing")
+	}
+	if m.footerLine() != first {
+		t.Fatal("sync status must remain static")
 	}
 }
-
-func TestUpdateArmsPulseWhenSyncBegins(t *testing.T) {
-	m := commitTestModel(t, nil)
-	m.loading = false
-	m.writesInFlight = 1
-	next, cmd := m.Update(pulseArmProbe{})
-	m = next.(Model)
-	if !m.pulsing || cmd == nil {
-		t.Error("any message leaving the model syncing should arm the pulse")
-	}
-}
-
-type pulseArmProbe struct{}
 
 func TestBackgroundRefreshYieldsToLocalEdits(t *testing.T) {
 	m := commitTestModel(t, nil)
