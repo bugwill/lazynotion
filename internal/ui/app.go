@@ -1026,7 +1026,7 @@ func (m Model) commitInlineEdit(value string) (tea.Model, tea.Cmd) {
 
 func markeredKind(kind string) bool {
 	switch kind {
-	case "paragraph", "heading_1", "heading_2", "heading_3",
+	case "paragraph", "heading_1", "heading_2", "heading_3", "heading_4",
 		"bulleted_list_item", "numbered_list_item", "to_do", "quote", "toggle":
 		return true
 	}

@@ -2,6 +2,9 @@ package notion
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/url"
 
 	"github.com/jomei/notionapi"
 )
@@ -24,13 +27,7 @@ func (c *Client) childBlocks(ctx context.Context, id notionapi.BlockID, depth in
 	var nodes []BlockNode
 	var cursor notionapi.Cursor
 	for {
-		if err := c.waitRequest(ctx); err != nil {
-			return nil, err
-		}
-		resp, err := c.api.Block.GetChildren(ctx, id, &notionapi.Pagination{
-			StartCursor: cursor,
-			PageSize:    100,
-		})
+		resp, err := c.blockChildren(ctx, id, cursor)
 		if err != nil {
 			return nil, err
 		}
@@ -51,6 +48,40 @@ func (c *Client) childBlocks(ctx context.Context, id notionapi.BlockID, depth in
 		cursor = notionapi.Cursor(resp.NextCursor)
 	}
 	return nodes, nil
+}
+
+type blockChildrenResponse struct {
+	Results    []notionapi.Block
+	HasMore    bool
+	NextCursor string
+}
+
+func (c *Client) blockChildren(ctx context.Context, id notionapi.BlockID, cursor notionapi.Cursor) (blockChildrenResponse, error) {
+	query := url.Values{"page_size": {"100"}}
+	if cursor != "" {
+		query.Set("start_cursor", string(cursor))
+	}
+	data, err := c.rawRequest(ctx, http.MethodGet, "/blocks/"+id.String()+"/children?"+query.Encode(), nil)
+	if err != nil {
+		return blockChildrenResponse{}, err
+	}
+	var raw struct {
+		Results    []json.RawMessage `json:"results"`
+		HasMore    bool              `json:"has_more"`
+		NextCursor string            `json:"next_cursor"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return blockChildrenResponse{}, err
+	}
+	resp := blockChildrenResponse{HasMore: raw.HasMore, NextCursor: raw.NextCursor}
+	for _, data := range raw.Results {
+		block, err := DecodeBlock(data)
+		if err != nil {
+			return blockChildrenResponse{}, err
+		}
+		resp.Results = append(resp.Results, block)
+	}
+	return resp, nil
 }
 
 // recursable also doubles as ReplacePageBlocks' deletion guard: types listed

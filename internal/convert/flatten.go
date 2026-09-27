@@ -139,6 +139,8 @@ func (u Unit) EditableMarkdown() (string, bool) {
 		return "## " + oneLine(text), true
 	case *notionapi.Heading3Block:
 		return "### " + oneLine(text), true
+	case *notion.Heading4Block:
+		return "#### " + oneLine(text), true
 	case *notionapi.BulletedListItemBlock:
 		return "- " + text, true
 	case *notionapi.NumberedListItemBlock:
@@ -166,6 +168,8 @@ func editableRichText(b notionapi.Block) ([]notionapi.RichText, bool) {
 		return block.Heading2.RichText, true
 	case *notionapi.Heading3Block:
 		return block.Heading3.RichText, true
+	case *notion.Heading4Block:
+		return block.Heading4.RichText, true
 	case *notionapi.BulletedListItemBlock:
 		return block.BulletedListItem.RichText, true
 	case *notionapi.NumberedListItemBlock:
@@ -209,6 +213,8 @@ func foldableNode(node notion.BlockNode) bool {
 		return b.Heading2.IsToggleable
 	case *notionapi.Heading3Block:
 		return b.Heading3.IsToggleable
+	case *notion.Heading4Block:
+		return b.Heading4.IsToggleable
 	}
 	return false
 }

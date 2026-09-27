@@ -36,6 +36,8 @@ func ParseEditPatch(value string) EditPatch {
 			kind = "heading_1"
 		case 2:
 			kind = "heading_2"
+		case 4:
+			kind = "heading_4"
 		default:
 			kind = "heading_3"
 		}
@@ -95,6 +97,8 @@ func BuildBlock(kind string, rts []notionapi.RichText, checked bool) notionapi.B
 		return headingBlock(2, rts)
 	case "heading_3":
 		return headingBlock(3, rts)
+	case "heading_4":
+		return headingBlock(4, rts)
 	case "to_do":
 		return &notionapi.ToDoBlock{BasicBlock: basic("to_do"), ToDo: notionapi.ToDo{RichText: rts, Checked: checked}}
 	case "bulleted_list_item":

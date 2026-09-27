@@ -24,6 +24,8 @@ func inlineChildren(b notionapi.Block) []notionapi.Block {
 	switch block := b.(type) {
 	case *notionapi.ParagraphBlock:
 		return block.Paragraph.Children
+	case *notion.Heading4Block:
+		return block.Heading4.Children
 	case *notionapi.BulletedListItemBlock:
 		return block.BulletedListItem.Children
 	case *notionapi.NumberedListItemBlock:

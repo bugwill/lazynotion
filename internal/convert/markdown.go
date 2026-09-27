@@ -41,6 +41,9 @@ func renderNode(b *strings.Builder, node notion.BlockNode, depth int) {
 	case *notionapi.Heading3Block:
 		writeLine(b, pad, "### "+oneLine(inline(block.Heading3.RichText)))
 		renderNodes(b, node.Children, depth)
+	case *notion.Heading4Block:
+		writeLine(b, pad, "#### "+oneLine(inline(block.Heading4.RichText)))
+		renderNodes(b, node.Children, depth)
 
 	case *notionapi.BulletedListItemBlock:
 		writeLine(b, pad, "- "+hardBreaks(inline(block.BulletedListItem.RichText)))

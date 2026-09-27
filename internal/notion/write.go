@@ -42,6 +42,8 @@ func SetLocalRichText(block notionapi.Block, rts []notionapi.RichText) bool {
 		b.Heading2.RichText = rts
 	case *notionapi.Heading3Block:
 		b.Heading3.RichText = rts
+	case *Heading4Block:
+		b.Heading4.RichText = rts
 	case *notionapi.BulletedListItemBlock:
 		b.BulletedListItem.RichText = rts
 	case *notionapi.NumberedListItemBlock:
@@ -91,6 +93,8 @@ func LocalRichText(block notionapi.Block) ([]notionapi.RichText, bool) {
 		return b.Heading2.RichText, true
 	case *notionapi.Heading3Block:
 		return b.Heading3.RichText, true
+	case *Heading4Block:
+		return b.Heading4.RichText, true
 	case *notionapi.BulletedListItemBlock:
 		return b.BulletedListItem.RichText, true
 	case *notionapi.NumberedListItemBlock:
@@ -126,6 +130,15 @@ func (c *Client) SetBlockRichText(ctx context.Context, block notionapi.Block, rt
 		req.Heading2 = &notionapi.Heading{RichText: rts, IsToggleable: b.Heading2.IsToggleable}
 	case *notionapi.Heading3Block:
 		req.Heading3 = &notionapi.Heading{RichText: rts, IsToggleable: b.Heading3.IsToggleable}
+	case *Heading4Block:
+		heading := b.Heading4
+		heading.RichText, heading.Children = rts, nil
+		body, err := json.Marshal(map[string]any{"heading_4": heading})
+		if err != nil {
+			return err
+		}
+		_, err = c.rawRequest(ctx, http.MethodPatch, "/blocks/"+b.ID.String(), body)
+		return err
 	case *notionapi.BulletedListItemBlock:
 		req.BulletedListItem = &notionapi.ListItem{RichText: rts}
 	case *notionapi.NumberedListItemBlock:
@@ -189,14 +202,21 @@ func (c *Client) RestoreBlock(ctx context.Context, blockID string) error {
 // AppendBlocks adds blocks to parentID, after the given block if afterID is
 // non-empty, otherwise at the bottom of the page. Returns created block IDs.
 func (c *Client) AppendBlocks(ctx context.Context, parentID, afterID string, blocks []notionapi.Block) ([]string, error) {
-	if err := c.waitRequest(ctx); err != nil {
-		return nil, err
-	}
-	resp, err := c.api.Block.AppendChildren(ctx, notionapi.BlockID(parentID), &notionapi.AppendBlockChildrenRequest{
+	body, err := json.Marshal(&notionapi.AppendBlockChildrenRequest{
 		After:    notionapi.BlockID(afterID),
 		Children: blocks,
 	})
 	if err != nil {
+		return nil, err
+	}
+	data, err := c.rawRequest(ctx, http.MethodPatch, "/blocks/"+parentID+"/children", body)
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		Results []notionapi.BasicBlock `json:"results"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
 		return nil, err
 	}
 	ids := make([]string, 0, len(resp.Results))
@@ -213,13 +233,7 @@ func (c *Client) ReplacePageBlocks(ctx context.Context, pageID string, blocks []
 	var existing []string
 	var cursor notionapi.Cursor
 	for {
-		if err := c.waitRequest(ctx); err != nil {
-			return err
-		}
-		resp, err := c.api.Block.GetChildren(ctx, notionapi.BlockID(pageID), &notionapi.Pagination{
-			StartCursor: cursor,
-			PageSize:    100,
-		})
+		resp, err := c.blockChildren(ctx, notionapi.BlockID(pageID), cursor)
 		if err != nil {
 			return err
 		}

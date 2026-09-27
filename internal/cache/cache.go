@@ -10,8 +10,6 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/jomei/notionapi"
-
 	"github.com/justinm35/lazynotion/internal/notion"
 )
 
@@ -167,20 +165,17 @@ func encodeNodes(nodes []notion.BlockNode) ([]diskNode, error) {
 func decodeNodes(disk []diskNode) ([]notion.BlockNode, error) {
 	out := make([]notion.BlockNode, 0, len(disk))
 	for _, d := range disk {
-		// notionapi.Blocks owns the type-dispatching unmarshal, so each
-		// block rides through it as a single-element array
-		var blocks notionapi.Blocks
-		if err := json.Unmarshal(append(append([]byte("["), d.Block...), ']'), &blocks); err != nil {
+		block, err := notion.DecodeBlock(d.Block)
+		if err != nil {
 			return nil, err
 		}
-		if len(blocks) != 1 {
-			continue
-		}
+		// Earlier SDK versions cached unknown blocks without their type or
+		// text. Treat these entries as misses so they are fetched again.
 		children, err := decodeNodes(d.Children)
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, notion.BlockNode{Block: blocks[0], Children: children})
+		out = append(out, notion.BlockNode{Block: block, Children: children})
 	}
 	return out, nil
 }

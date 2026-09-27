@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/jomei/notionapi"
+	"github.com/justinm35/lazynotion/internal/notion"
 )
 
 // ParseMarkdown converts edited markdown back into Notion blocks. It covers
@@ -273,6 +274,8 @@ func headingBlock(level int, rts []notionapi.RichText) notionapi.Block {
 		return &notionapi.Heading1Block{BasicBlock: basic("heading_1"), Heading1: notionapi.Heading{RichText: rts}}
 	case 2:
 		return &notionapi.Heading2Block{BasicBlock: basic("heading_2"), Heading2: notionapi.Heading{RichText: rts}}
+	case 4:
+		return &notion.Heading4Block{BasicBlock: basic("heading_4"), Heading4: notionapi.Heading{RichText: rts}}
 	default:
 		return &notionapi.Heading3Block{BasicBlock: basic("heading_3"), Heading3: notionapi.Heading{RichText: rts}}
 	}

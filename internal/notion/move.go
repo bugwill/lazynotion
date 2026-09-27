@@ -178,9 +178,9 @@ func ReplaceBlockID(node BlockNode, newID string) BlockNode {
 	if err != nil {
 		return node
 	}
-	var blocks notionapi.Blocks
-	if err := json.Unmarshal(append(append([]byte("["), patched...), ']'), &blocks); err != nil || len(blocks) != 1 {
+	block, err := DecodeBlock(patched)
+	if err != nil {
 		return node
 	}
-	return BlockNode{Block: blocks[0], Children: node.Children}
+	return BlockNode{Block: block, Children: node.Children}
 }
