@@ -8,7 +8,7 @@ import (
 	"github.com/justinm35/lazynotion/internal/notion"
 )
 
-func TestPageKeepsQueryProgressWithPagesHidden(t *testing.T) {
+func TestPageShowsOnlyGlobalSyncStatus(t *testing.T) {
 	m := New([]Workspace{{Name: "fixture"}}, 0, nil, "mosaic")
 	m.width, m.height, m.loading = 80, 24, false
 	page := notion.Page{ID: "fixture-page", Title: "Fixture"}
@@ -16,11 +16,11 @@ func TestPageKeepsQueryProgressWithPagesHidden(t *testing.T) {
 	m.recentQuery = &queryState{progress: notion.QueryProgress{Stage: "pages", Done: 51, Total: 106}}
 	m.layout()
 	view := stripAnsi(m.View())
-	if strings.Contains(view, "Pages") || !strings.Contains(view, "Updating pages 51/106") || !strings.Contains(view, "━") {
-		t.Fatalf("page lost progress or restored the hidden sidebar: %s", view)
+	if strings.Contains(view, "Updating pages") || strings.Contains(view, "51/106") || strings.Contains(view, "━") || strings.Count(view, "同步中") != 1 {
+		t.Fatalf("page should show only one static sync status: %s", view)
 	}
 	m.recentQuery = nil
-	if strings.Contains(stripAnsi(m.View()), "Updating pages") {
+	if strings.Contains(stripAnsi(m.View()), "同步中") {
 		t.Fatal("completed progress stayed visible")
 	}
 }

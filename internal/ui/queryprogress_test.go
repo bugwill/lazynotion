@@ -7,11 +7,10 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 	"github.com/justinm35/lazynotion/internal/notion"
 )
 
-func TestProgressStaysAtSidebarBottomAndClearsOnCompletion(t *testing.T) {
+func TestQueryShowsOnlyGlobalSyncStatusAndClearsOnCompletion(t *testing.T) {
 	m := New([]Workspace{{Name: "test"}}, 0, nil, "mosaic")
 	m.width, m.height = 90, 30
 	m.loading = false
@@ -20,12 +19,9 @@ func TestProgressStaysAtSidebarBottomAndClearsOnCompletion(t *testing.T) {
 	event := queryEvent{kind: "recent", gen: 0, stream: ch, start: true, payload: notion.QueryProgress{Stage: "pages", Done: 2, Total: 4}}
 	next, _ := m.Update(event)
 	m = next.(Model)
-	lines := strings.Split(m.sidebarContent(), "\n")
-	if !strings.Contains(lines[len(lines)-2], "Updating pages 2/4") {
-		t.Fatal("progress must be at the bottom of Pages")
-	}
-	if lipgloss.Width(lines[len(lines)-1]) != m.sidebar.Width() {
-		t.Fatal("bar must fit sidebar width")
+	view := stripAnsi(m.View())
+	if strings.Contains(view, "Updating pages") || strings.Contains(view, "2/4") || strings.Contains(view, "━") || strings.Count(view, "同步中") != 1 {
+		t.Fatalf("query should show only one static sync status: %s", view)
 	}
 	if !m.syncing() {
 		t.Fatal("background query must show the sync status")
@@ -103,16 +99,23 @@ func TestOldWorkspaceStreamIsDrained(t *testing.T) {
 	}
 }
 
-func TestUnknownProgressUsesStaticSyncStatus(t *testing.T) {
+func TestProgressUpdatesDoNotChangeRenderedSyncStatus(t *testing.T) {
 	m := New([]Workspace{{Name: "test"}}, 0, nil, "mosaic")
-	m.width, m.height = 90, 30
+	m.width, m.height, m.loading = 90, 30, false
 	m.layout()
-	m.pagesQuery = &queryState{progress: notion.QueryProgress{Stage: "search"}}
-	if !strings.Contains(stripAnsi(m.sidebarContent()), "同步中") {
-		t.Fatal("unknown sidebar progress must show static sync status")
-	}
-	m.selected = &notion.Page{ID: "page", Title: "Page"}
-	if got := stripAnsi(m.pageQueryFooter()); got != "同步中" {
-		t.Fatalf("unknown page progress = %q", got)
+	for _, selected := range []*notion.Page{nil, {ID: "page", Title: "Page"}} {
+		m.selected = selected
+		stream := make(chan tea.Msg)
+		m.pagesQuery = &queryState{stream: stream, progress: notion.QueryProgress{Stage: "search"}}
+		before := m.View()
+		event := queryEvent{kind: "pages", gen: m.wsGen, stream: stream, payload: notion.QueryProgress{Stage: "pages", Done: 51, Total: 106}}
+		next, _ := m.Update(event)
+		m = next.(Model)
+		if got := m.View(); got != before {
+			t.Fatalf("progress update changed the rendered view: %s", stripAnsi(got))
+		}
+		if strings.Count(stripAnsi(before), "同步中") != 1 {
+			t.Fatal("view should show exactly one static sync status")
+		}
 	}
 }

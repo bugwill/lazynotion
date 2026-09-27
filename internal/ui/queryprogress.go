@@ -2,8 +2,6 @@ package ui
 
 import (
 	"context"
-	"fmt"
-	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -106,75 +104,8 @@ func (m Model) handleQueryEvent(event queryEvent) (tea.Model, tea.Cmd) {
 	return updated, tea.Batch(cmd, next)
 }
 
-var queryBlue = lipgloss.NewStyle().Foreground(lipgloss.Color("117"))
-
-// Keep query progress visible when the Pages pane is hidden inside a page.
-func (m Model) pageQueryFooter() string {
-	state := m.recentQuery
-	if state == nil {
-		state = m.pagesQuery
-	}
-	if m.selected == nil || state == nil {
-		return ""
-	}
-	p := state.progress
-	label := queryProgressLabel(p)
-	barWidth := min(8, max(m.width/4, 1))
-	label = truncateText(label, max(m.width-barWidth-2, 1))
-	filled := 0
-	if p.Total > 0 {
-		filled = clamp(p.Done*barWidth/p.Total, 0, barWidth)
-		return queryBlue.Render(label+" "+strings.Repeat("━", filled)) + pageMetaStyle.Render(strings.Repeat("─", barWidth-filled))
-	}
-	return queryBlue.Render("同步中")
-}
-
-func queryProgressLabel(p notion.QueryProgress) string {
-	label := map[string]string{"search": "Searching", "databases": "Updating databases", "checking": "Checking pages", "pages": "Updating pages", "content": "Loading content", "rows": "Updating database rows"}[p.Stage]
-	if label == "" {
-		label = "Updating"
-	}
-	if p.Total > 0 {
-		label += fmt.Sprintf(" %d/%d", p.Done, p.Total)
-	} else if p.Done > 0 {
-		label += fmt.Sprintf(" · %d found", p.Done)
-	}
-	return label
-}
-
+// Sync status is shown only in the global footer.
 func (m Model) sidebarContent() string {
 	height := max(m.height-m.footerHeight()-2, 0)
-	if height < 3 {
-		return m.sidebar.View()
-	}
-	body := lipgloss.NewStyle().Height(height - 2).MaxHeight(height - 2).Render(m.sidebar.View())
-	state := m.recentQuery
-	if state == nil {
-		state = m.pagesQuery
-	}
-	if state == nil && !m.loading && !m.pageLoading {
-		return body + "\n\n"
-	}
-	p := notion.QueryProgress{Stage: "search"}
-	if state == nil && m.pageLoading && !m.loading && m.recent == nil {
-		p.Stage = "content"
-	}
-	if state != nil {
-		p = state.progress
-	}
-	width := max(m.sidebar.Width(), 1)
-	label := queryProgressLabel(p)
-	filled := 0
-	if p.Total > 0 {
-		filled = clamp(p.Done*width/p.Total, 0, width)
-	}
-	bar := ""
-	if p.Total > 0 {
-		bar = queryBlue.Render(strings.Repeat("━", filled)) + pageMetaStyle.Render(strings.Repeat("─", width-filled))
-	} else {
-		// Unknown totals use a static status instead of an animated bar.
-		label = "同步中"
-		bar = pageMetaStyle.Render(strings.Repeat("─", width))
-	}
-	return body + "\n" + queryBlue.Render(truncateText(label, width)) + "\n" + bar
+	return lipgloss.NewStyle().Height(height).MaxHeight(height).Render(m.sidebar.View())
 }

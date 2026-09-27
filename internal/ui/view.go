@@ -175,8 +175,6 @@ func (m Model) statusLine() string {
 		return errStyle.Render("error: " + m.err.Error())
 	case m.statusMsg != "":
 		return statusStyle.Render(m.statusMsg)
-	case m.pageQueryFooter() != "":
-		return m.pageQueryFooter()
 	case m.focus == focusViewer && m.recent != nil:
 		return statusStyle.Render("j/k move · enter open · r refresh · esc back · / search")
 	case m.focus == focusViewer && m.db != nil:
