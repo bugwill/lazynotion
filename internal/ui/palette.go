@@ -63,7 +63,7 @@ func linePrefix(prefix string) func(*Model) {
 		rows := strings.Split(m.editArea.Value(), "\n")
 		row := clamp(m.editArea.Line(), 0, len(rows)-1)
 		rows[row] = prefix + strings.TrimLeft(rows[row], " ")
-		m.editArea.SetValue(strings.Join(rows, "\n"))
+		m.setEditValue(strings.Join(rows, "\n"))
 	}
 }
 
@@ -82,7 +82,7 @@ func insertToggle(m *Model) {
 	row := clamp(m.editArea.Line(), 0, len(rows)-1)
 	content := strings.TrimLeft(rows[row], " ")
 	rows[row] = "**▸ " + content + "**"
-	m.editArea.SetValue(strings.Join(rows, "\n"))
+	m.setEditValue(strings.Join(rows, "\n"))
 	m.cursorBackInRow(2)
 }
 

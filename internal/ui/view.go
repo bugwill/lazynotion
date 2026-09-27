@@ -8,7 +8,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/muesli/reflow/truncate"
+	"github.com/charmbracelet/x/ansi"
 )
 
 var (
@@ -51,34 +51,25 @@ func (m Model) View() string {
 	}
 
 	paneHeight := m.height - m.footerHeight()
-	sidebarWidth := clamp(m.width/3, 24, 40)
-	viewerWidth := m.width - sidebarWidth
-
-	sidebarStyle, viewerStyle := blurredPaneStyle, blurredPaneStyle
-	if m.focus == focusSidebar {
-		sidebarStyle = focusedPaneStyle
-	} else {
-		viewerStyle = focusedPaneStyle
+	if m.selected == nil {
+		root := focusedPaneStyle.
+			Width(max(m.width-2, 1)).
+			Height(max(paneHeight-2, 0)).
+			Render(m.sidebarContent())
+		root = withBorderTitle(root, sidebarTitle(m.workspaces, m.wsIndex), true)
+		return lipgloss.JoinVertical(lipgloss.Left, root, m.footerLine())
 	}
 
-	sidebar := sidebarStyle.
-		Width(sidebarWidth - 2).
-		Height(paneHeight - 2).
-		Render(m.sidebar.View())
-	sidebar = withBorderTitle(sidebar, sidebarTitle(m.workspaces, m.wsIndex), m.focus == focusSidebar)
-
-	viewer := viewerStyle.
-		Width(viewerWidth - 2).
+	viewer := focusedPaneStyle.
+		Width(max(m.width-2, 1)).
 		Height(paneHeight - 2).
 		Render(m.viewerContent())
-	viewer = withBorderTitle(viewer, m.viewerTitle(), m.focus == focusViewer)
-
-	panes := lipgloss.JoinHorizontal(lipgloss.Top, sidebar, viewer)
+	viewer = withBorderTitle(viewer, m.viewerTitle(), true)
 	footer := m.footerLine()
 	if m.paletteOpen {
 		footer = m.paletteView()
 	}
-	return lipgloss.JoinVertical(lipgloss.Left, panes, footer)
+	return lipgloss.JoinVertical(lipgloss.Left, viewer, footer)
 }
 
 // footerLine right-aligns the sync indicator and memory readout.
@@ -93,16 +84,16 @@ func (m Model) footerLine() string {
 		right = right + statusStyle.Render(m.memUsage)
 	}
 	if right == "" {
-		return left
+		return ansi.Truncate(left, max(m.width, 0), "…")
 	}
 	right = lipgloss.NewStyle().Render(right)
 	gap := m.width - lipgloss.Width(left) - lipgloss.Width(right)
 	if gap < 1 {
 		// the sync/memory readout outranks the tail of the help text
-		left = truncate.String(left, uint(max(m.width-lipgloss.Width(right)-1, 0)))
+		left = ansi.Truncate(left, max(m.width-lipgloss.Width(right)-1, 0), "…")
 		gap = max(m.width-lipgloss.Width(left)-lipgloss.Width(right), 1)
 	}
-	return left + strings.Repeat(" ", gap) + right
+	return ansi.Truncate(left+strings.Repeat(" ", gap)+right, max(m.width, 0), "…")
 }
 
 func (m Model) viewerTitle() string {
@@ -141,6 +132,9 @@ func withBorderTitle(box, title string, focused bool) string {
 }
 
 func (m Model) viewerContent() string {
+	if m.recent != nil {
+		return m.recentView()
+	}
 	if m.db != nil {
 		return m.dbGridView()
 	}
@@ -165,7 +159,10 @@ func (m Model) viewerContent() string {
 func (m Model) statusLine() string {
 	switch {
 	case m.editing:
-		return confirmStyle.Render("editing block · esc save · ctrl+c discard")
+		if m.editAnchor >= 0 {
+			return confirmStyle.Render(fmt.Sprintf("selecting %d chars · b bold · u undo · esc save · ctrl+d discard", m.editSelectionLength()))
+		}
+		return confirmStyle.Render("editing · mouse drag / ctrl+v select · ctrl+w word · esc save · ctrl+d discard")
 	case m.confirm != nil:
 		prompt := fmt.Sprintf("replace %q in notion?", m.confirm.page.Title)
 		if m.confirm.warning != "" {
@@ -182,6 +179,10 @@ func (m Model) statusLine() string {
 		return errStyle.Render("error: " + m.err.Error())
 	case m.statusMsg != "":
 		return statusStyle.Render(m.statusMsg)
+	case m.pageQueryFooter() != "":
+		return m.pageQueryFooter()
+	case m.focus == focusViewer && m.recent != nil:
+		return statusStyle.Render("j/k move · enter open · r refresh · esc back · / search")
 	case m.focus == focusViewer && m.db != nil:
 		return statusStyle.Render(dbHelp)
 	case m.focus == focusViewer:

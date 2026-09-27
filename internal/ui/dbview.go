@@ -17,33 +17,40 @@ import (
 // rows loaded so far. It lives behind a pointer so history entries can stash
 // the whole view and esc restores it — cursor, scroll and rows intact.
 type dbState struct {
-	ref     notion.Page // the entry that was opened (title, URL)
-	dsID    string
-	ds      *notion.DataSource
-	rows    []notion.Row
-	cursor  int
-	scroll  int // first visible row
-	colOff  int // first visible column after the title column
-	hasMore bool
+	ref         notion.Page // the entry that was opened (title, URL)
+	dsID        string
+	ds          *notion.DataSource
+	rows        []notion.Row
+	cursor      int
+	scroll      int // first visible row
+	colOff      int // first visible column after the title column
+	hasMore     bool
 	nextCursor  string
 	loadingMore bool
 	sources     int // data sources in the database (>1 shows a note)
 }
 
 const (
-	dbPageSize     = 50
-	dbLoadMoreNear = 10 // fetch the next page this many rows before the end
-	dbMinColWidth  = 6
-	dbMaxColWidth  = 32
+	dbPageSize      = 50
+	dbLoadMoreNear  = 10 // fetch the next page this many rows before the end
+	dbMinColWidth   = 6
+	dbMaxColWidth   = 32
 	dbMaxTitleWidth = 40
 )
 
 type dbLoadedMsg struct {
-	key     string // ref.ID, to drop results for a view navigated away from
-	ds      *notion.DataSource
-	rows    *notion.RowPage
-	sources int
-	wsGen   int
+	key       string // ref.ID, to drop results for a view navigated away from
+	ds        *notion.DataSource
+	rows      *notion.RowPage
+	sources   int
+	wsGen     int
+	fromCache bool
+}
+
+type cachedDatabase struct {
+	Source  *notion.DataSource
+	Rows    *notion.RowPage
+	Sources int
 }
 
 type dbRowsMsg struct {
@@ -56,17 +63,31 @@ type dbRowsMsg struct {
 // child_database block (whose ID is the database, resolved to its first
 // data source while loading).
 func (m Model) openDatabaseView(ref notion.Page) (tea.Model, tea.Cmd) {
+	m.recent = nil
 	m.selected = &ref
 	m.focus = focusViewer
 	m.db = &dbState{ref: ref}
 	m.pageLoading = true
 	m.err = nil
+	m.layout()
 	return m, m.loadDatabaseView(ref)
 }
 
 func (m Model) loadDatabaseView(ref notion.Page) tea.Cmd {
+	return m.fetchDatabaseView(ref, false)
+}
+
+func (m Model) fetchDatabaseView(ref notion.Page, force bool) tea.Cmd {
 	client, gen := m.client, m.wsGen
+	store := m.store
 	return func() tea.Msg {
+		key := "database:" + client.CacheKey() + ":" + ref.ID
+		if !force && store != nil {
+			var cached cachedDatabase
+			if store.LoadMetadata(key, &cached) && cached.Source != nil && cached.Rows != nil {
+				return dbLoadedMsg{key: ref.ID, ds: cached.Source, rows: cached.Rows, sources: cached.Sources, wsGen: gen, fromCache: true}
+			}
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 		defer cancel()
 		dsID, sources := ref.ID, 1
@@ -89,6 +110,9 @@ func (m Model) loadDatabaseView(ref notion.Page) tea.Cmd {
 		rows, err := client.QueryDataSource(ctx, dsID, "", dbPageSize)
 		if err != nil {
 			return errMsg{err}
+		}
+		if store != nil {
+			_ = store.SaveMetadata(key, cachedDatabase{Source: ds, Rows: rows, Sources: sources})
 		}
 		return dbLoadedMsg{key: ref.ID, ds: ds, rows: rows, sources: sources, wsGen: gen}
 	}
@@ -121,6 +145,9 @@ func (m Model) handleDBLoaded(msg dbLoadedMsg) (tea.Model, tea.Cmd) {
 	m.db.sources = msg.sources
 	if msg.sources > 1 {
 		m.statusMsg = fmt.Sprintf("this database has %d data sources — showing the first", msg.sources)
+	}
+	if msg.fromCache {
+		return m, m.fetchDatabaseView(m.db.ref, true)
 	}
 	return m, nil
 }
@@ -201,7 +228,7 @@ func (m Model) refreshDatabaseView() (tea.Model, tea.Cmd) {
 	m.db = &dbState{ref: ref}
 	m.pageLoading = true
 	m.statusMsg = "refreshing database…"
-	return m, m.loadDatabaseView(ref)
+	return m, m.fetchDatabaseView(ref, true)
 }
 
 // --- rendering ---------------------------------------------------------

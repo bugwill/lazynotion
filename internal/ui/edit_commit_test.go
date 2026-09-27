@@ -50,6 +50,55 @@ func TestCommitTodoEditSyncsCheckbox(t *testing.T) {
 	}
 }
 
+func TestInlineEscAutosavesSelectionAndEmptyText(t *testing.T) {
+	para := &notionapi.ParagraphBlock{
+		BasicBlock: notionapi.BasicBlock{ID: "p1", Type: "paragraph"},
+		Paragraph:  notionapi.Paragraph{RichText: []notionapi.RichText{{PlainText: "idea", Text: &notionapi.Text{Content: "idea"}}}},
+	}
+	m := commitTestModel(t, para)
+	next, _ := m.startInlineEdit()
+	m = next.(Model)
+	m.editArea.SetValue("")
+	m.editAnchor = 0 // Esc must save directly even while selection mode is active.
+	next, cmd := m.updateInlineEdit(tea.KeyMsg{Type: tea.KeyEsc})
+	m = next.(Model)
+	if m.editing {
+		t.Fatal("Esc should leave inline editing")
+	}
+	if cmd == nil {
+		t.Fatal("Esc should autosave changed content")
+	}
+	if got := len(para.Paragraph.RichText); got != 0 {
+		t.Fatalf("empty edit kept %d rich-text fragments, want an empty existing block", got)
+	}
+}
+
+func TestInlineCtrlDDiscardsEvenWithPaletteOpen(t *testing.T) {
+	for _, key := range []tea.KeyType{tea.KeyCtrlD, tea.KeyCtrlC} {
+		para := &notionapi.ParagraphBlock{
+			BasicBlock: notionapi.BasicBlock{ID: "p1", Type: "paragraph"},
+			Paragraph:  notionapi.Paragraph{RichText: []notionapi.RichText{{PlainText: "idea", Text: &notionapi.Text{Content: "idea"}}}},
+		}
+		m := commitTestModel(t, para)
+		next, _ := m.startInlineEdit()
+		m = next.(Model)
+		m.editArea.SetValue("discard me")
+		m.paletteOpen = true
+
+		next, cmd := m.updateInlineEdit(tea.KeyMsg{Type: key})
+		m = next.(Model)
+		if m.editing || m.paletteOpen {
+			t.Errorf("key %v should discard and close editor/palette", key)
+		}
+		if cmd != nil {
+			t.Errorf("key %v unexpectedly started a write", key)
+		}
+		if got := para.Paragraph.RichText[0].PlainText; got != "idea" {
+			t.Errorf("key %v changed block text to %q", key, got)
+		}
+	}
+}
+
 func TestCommitMarkerChangeConvertsBlock(t *testing.T) {
 	para := &notionapi.ParagraphBlock{
 		BasicBlock: notionapi.BasicBlock{ID: "p1", Type: "paragraph"},

@@ -76,10 +76,17 @@ func main() {
 		debugIcons(cfg)
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "recent-report" {
+		if err := recentReport(cfg, os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	workspaces := make([]ui.Workspace, len(cfg.Workspaces))
 	for i, w := range cfg.Workspaces {
-		workspaces[i] = ui.Workspace{Name: w.Name, Client: notion.NewClient(w.Token), RootOnly: w.RootOnly}
+		workspaces[i] = ui.Workspace{Name: w.Name, Client: notion.NewClient(w.Token), RootOnly: w.RootOnly, RootPages: w.RootPages}
 	}
 
 	ui.ApplyTheme(cfg.Accent, cfg.Style)
@@ -89,7 +96,7 @@ func main() {
 		store = nil // caching disabled, everything still works
 	}
 
-	program := tea.NewProgram(ui.New(workspaces, cfg.DefaultIndex, store, cfg.Images), tea.WithAltScreen())
+	program := tea.NewProgram(ui.New(workspaces, cfg.DefaultIndex, store, cfg.Images), tea.WithAltScreen(), tea.WithMouseCellMotion())
 	if _, err := program.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)

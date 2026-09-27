@@ -3,11 +3,16 @@ package notion
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net/http"
+	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jomei/notionapi"
@@ -37,21 +42,34 @@ type Page struct {
 	URL        string
 	LastEdited time.Time
 	Kind       PageKind
+	ParentID   string
+	ParentType string
 	// DatabaseID is the containing database for data-source entries.
 	DatabaseID string
 }
 
 type Client struct {
-	api     *notionapi.Client
-	token   string
-	limiter *rate.Limiter
+	api         *notionapi.Client
+	token       string
+	limiter     *rate.Limiter
+	retryMu     sync.Mutex
+	retryAt     time.Time
+	rawRequests atomic.Uint64
+}
+
+// RawRequestCount counts HTTP attempts, including retries, for diagnostics.
+func (c *Client) RawRequestCount() uint64 { return c.rawRequests.Load() }
+
+// CacheKey scopes persisted metadata to the integration without storing its token.
+func (c *Client) CacheKey() string {
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(c.token)))
 }
 
 func NewClient(token string) *Client {
 	return &Client{
 		api:   notionapi.NewClient(notionapi.Token(token)),
 		token: token,
-		// Notion allows short bursts above its 3 req/s average
+		// Conservative default for all plans; workers share this limiter.
 		limiter: rate.NewLimiter(rate.Limit(3), 6),
 	}
 }
@@ -71,37 +89,119 @@ func (c *Client) rawRequest(ctx context.Context, method, path string, body []byt
 }
 
 // rawRequestV is rawRequest with an explicit Notion-Version header.
-func (c *Client) rawRequestV(ctx context.Context, method, path string, body []byte, version string) ([]byte, error) {
-	if err := c.limiter.Wait(ctx); err != nil {
-		return nil, err
+// APIError keeps structured errors for retry and permission decisions.
+type APIError struct {
+	Status  int
+	Code    string
+	Reason  string
+	Message string
+}
+
+func (e *APIError) Error() string {
+	return fmt.Sprintf("notion api: %d %s: %s", e.Status, http.StatusText(e.Status), e.Message)
+}
+
+func waitUntil(ctx context.Context, until time.Time) error {
+	delay := time.Until(until)
+	if delay <= 0 {
+		return ctx.Err()
 	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+// All SDK and raw requests share the pause established by a rate-limit reply.
+func (c *Client) waitRequest(ctx context.Context) error {
+	if err := c.limiter.Wait(ctx); err != nil {
+		return err
+	}
+	for {
+		c.retryMu.Lock()
+		until := c.retryAt
+		c.retryMu.Unlock()
+		if time.Until(until) <= 0 {
+			return ctx.Err()
+		}
+		if err := waitUntil(ctx, until); err != nil {
+			return err
+		}
+	}
+}
+
+func (c *Client) rawRequestV(ctx context.Context, method, path string, body []byte, version string) ([]byte, error) {
+	for attempt := 0; ; attempt++ {
+		if err := c.waitRequest(ctx); err != nil {
+			return nil, err
+		}
+		data, header, err := c.rawAttempt(ctx, method, path, body, version)
+		apiErr, ok := err.(*APIError)
+		if !ok || attempt >= 3 {
+			return data, err
+		}
+		readOnly := method == http.MethodGet || method == http.MethodPost && (path == "/search" || strings.HasSuffix(path, "/query"))
+		retry := apiErr.Status == 429 && apiErr.Reason != "public_api_request_blocked" || apiErr.Status == 529 || readOnly && (apiErr.Status == 500 || apiErr.Status == 502 || apiErr.Status == 503 || apiErr.Status == 504)
+		if !retry {
+			return data, err
+		}
+		delay := time.Second * time.Duration(1<<attempt)
+		if seconds, parseErr := strconv.Atoi(header.Get("Retry-After")); parseErr == nil && seconds >= 0 {
+			delay = time.Duration(seconds) * time.Second
+		}
+		// One shared pause prevents each worker from retrying independently. Small
+		// jitter spreads retries without changing the server's minimum wait.
+		until := time.Now().Add(delay + time.Duration(rand.IntN(250))*time.Millisecond)
+		c.retryMu.Lock()
+		if until.After(c.retryAt) {
+			c.retryAt = until
+		}
+		c.retryMu.Unlock()
+	}
+}
+
+func (c *Client) rawAttempt(ctx context.Context, method, path string, body []byte, version string) ([]byte, http.Header, error) {
 	var reader io.Reader
 	if body != nil {
 		reader = bytes.NewReader(body)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, apiBase+path, reader)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	req.Header.Set("Notion-Version", version)
 	req.Header.Set("Content-Type", "application/json")
+	c.rawRequests.Add(1)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer resp.Body.Close()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 	if err != nil {
-		return nil, err
+		return nil, resp.Header, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("notion api: %s: %.300s", resp.Status, data)
+		var detail struct {
+			Code       string `json:"code"`
+			Additional struct {
+				Reason string `json:"rate_limit_reason"`
+			} `json:"additional_data"`
+		}
+		_ = json.Unmarshal(data, &detail)
+		return nil, resp.Header, &APIError{Status: resp.StatusCode, Code: detail.Code, Reason: detail.Additional.Reason, Message: fmt.Sprintf("%.300s", data)}
 	}
-	return data, nil
+	return data, resp.Header, nil
 }
 
 type rawPage struct {
+	Archived       bool            `json:"archived"`
+	InTrash        bool            `json:"in_trash"`
 	Object         string          `json:"object"`
 	ID             string          `json:"id"`
 	URL            string          `json:"url"`
@@ -116,17 +216,18 @@ type rawPage struct {
 		} `json:"file"`
 	} `json:"cover"`
 	Parent struct {
-		Type       string `json:"type"`
-		DatabaseID string `json:"database_id"`
+		Type         string `json:"type"`
+		DatabaseID   string `json:"database_id"`
+		PageID       string `json:"page_id"`
+		DataSourceID string `json:"data_source_id"`
 	} `json:"parent"`
 	// TitleRT is the top-level title array data sources carry (pages keep
 	// theirs inside properties).
 	TitleRT    []rawRichText `json:"title"`
 	Properties map[string]struct {
-		Type  string `json:"type"`
-		Title []struct {
-			PlainText string `json:"plain_text"`
-		} `json:"title"`
+		Type string `json:"type"`
+		// Pages carry rich-text arrays; data-source schemas carry {}.
+		Title json.RawMessage `json:"title"`
 	} `json:"properties"`
 }
 
@@ -151,8 +252,14 @@ func (p rawPage) title() string {
 		if prop.Type != "title" {
 			continue
 		}
+		var title []struct {
+			PlainText string `json:"plain_text"`
+		}
+		if err := json.Unmarshal(prop.Title, &title); err != nil {
+			continue
+		}
 		var b strings.Builder
-		for _, t := range prop.Title {
+		for _, t := range title {
 			b.WriteString(t.PlainText)
 		}
 		if s := strings.TrimSpace(b.String()); s != "" {
@@ -170,11 +277,14 @@ type rawSearchResponse struct {
 
 // rawSearch runs unfiltered under the data-sources API version, so one
 // request returns pages and data sources (databases) together.
-func (c *Client) rawSearch(ctx context.Context, query, cursor string, pageSize int) (*rawSearchResponse, error) {
+func (c *Client) rawSearch(ctx context.Context, query, cursor string, pageSize int, object ...string) (*rawSearchResponse, error) {
 	req := map[string]any{
 		"query":     query,
 		"page_size": pageSize,
 		"sort":      map[string]string{"direction": "descending", "timestamp": "last_edited_time"},
+	}
+	if len(object) > 0 && object[0] != "" {
+		req["filter"] = map[string]string{"property": "object", "value": object[0]}
 	}
 	if cursor != "" {
 		// the API rejects an empty start_cursor
@@ -198,7 +308,7 @@ func (c *Client) rawSearch(ctx context.Context, query, cursor string, pageSize i
 // PageLastEdited fetches just the page's metadata — one request, used to
 // decide whether a disk-cached copy is still fresh.
 func (c *Client) PageLastEdited(ctx context.Context, pageID string) (time.Time, error) {
-	if err := c.limiter.Wait(ctx); err != nil {
+	if err := c.waitRequest(ctx); err != nil {
 		return time.Time{}, err
 	}
 	page, err := c.api.Page.Get(ctx, notionapi.PageID(pageID))
@@ -218,6 +328,21 @@ const maxSearchScan = 500
 // under other pages are filtered out — the API cannot filter by parent,
 // so the filter is applied while paginating.
 func (c *Client) Search(ctx context.Context, query string, rootOnly bool) ([]Page, error) {
+	return c.search(ctx, query, rootOnly, true)
+}
+
+func (c *Client) SearchWithProgress(ctx context.Context, query string, rootOnly bool, report func(QueryProgress)) ([]Page, error) {
+	return c.search(ctx, query, rootOnly, true, report)
+}
+
+func (c *Client) search(ctx context.Context, query string, rootOnly, bounded bool, reports ...func(QueryProgress)) ([]Page, error) {
+	var report func(QueryProgress)
+	if len(reports) > 0 {
+		report = reports[0]
+	}
+	if report != nil {
+		report(QueryProgress{Stage: "search"})
+	}
 	var pages []Page
 	cursor := ""
 	scanned := 0
@@ -235,6 +360,8 @@ func (c *Client) Search(ctx context.Context, query string, rootOnly bool) ([]Pag
 				Cover:      p.coverURL(),
 				URL:        p.URL,
 				LastEdited: p.LastEditedTime,
+				ParentID:   p.Parent.PageID,
+				ParentType: p.Parent.Type,
 			}
 			switch p.Object {
 			case "page":
@@ -254,7 +381,10 @@ func (c *Client) Search(ctx context.Context, query string, rootOnly bool) ([]Pag
 			}
 			pages = append(pages, page)
 		}
-		if !resp.HasMore || len(pages) >= maxSearchResults || scanned >= maxSearchScan {
+		if report != nil {
+			report(QueryProgress{Stage: "search", Done: len(pages)})
+		}
+		if !resp.HasMore || (bounded && (len(pages) >= maxSearchResults || scanned >= maxSearchScan)) {
 			break
 		}
 		cursor = resp.NextCursor

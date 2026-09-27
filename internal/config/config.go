@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/BurntSushi/toml"
 )
@@ -17,7 +18,8 @@ type Workspace struct {
 	Token string
 	// RootOnly limits the sidebar to workspace-level pages; nested pages
 	// are reached by navigating into their parents (or via search).
-	RootOnly bool
+	RootOnly  bool
+	RootPages string
 }
 
 type Config struct {
@@ -67,9 +69,11 @@ func Load() (Config, error) {
 		Accent        string `toml:"accent"`
 		Style         string `toml:"style"`
 		RootPagesOnly bool   `toml:"root_pages_only"`
+		RootPages     string `toml:"root_pages"`
 		Workspaces    map[string]struct {
-			Token         string `toml:"token"`
-			RootPagesOnly *bool  `toml:"root_pages_only"`
+			Token         string  `toml:"token"`
+			RootPagesOnly *bool   `toml:"root_pages_only"`
+			RootPages     *string `toml:"root_pages"`
 		} `toml:"workspaces"`
 	}
 	if path, err := Path(); err == nil {
@@ -90,19 +94,30 @@ func Load() (Config, error) {
 			continue
 		}
 		rootOnly := raw.RootPagesOnly
+		rootPages := raw.RootPages
+		if w.RootPages != nil {
+			rootPages = *w.RootPages
+		}
 		if w.RootPagesOnly != nil {
 			rootOnly = *w.RootPagesOnly
 		}
-		cfg.Workspaces = append(cfg.Workspaces, Workspace{Name: name, Token: w.Token, RootOnly: rootOnly})
+		cfg.Workspaces = append(cfg.Workspaces, Workspace{Name: name, Token: w.Token, RootOnly: rootOnly, RootPages: rootPages})
 	}
 	if raw.Token != "" {
-		cfg.Workspaces = append(cfg.Workspaces, Workspace{Name: "default", Token: raw.Token, RootOnly: raw.RootPagesOnly})
+		cfg.Workspaces = append(cfg.Workspaces, Workspace{Name: "default", Token: raw.Token, RootOnly: raw.RootPagesOnly, RootPages: raw.RootPages})
 	}
 	if env := os.Getenv("NOTION_TOKEN"); env != "" {
-		cfg.Workspaces = append([]Workspace{{Name: "env", Token: env, RootOnly: raw.RootPagesOnly}}, cfg.Workspaces...)
+		cfg.Workspaces = append([]Workspace{{Name: "env", Token: env, RootOnly: raw.RootPagesOnly, RootPages: raw.RootPages}}, cfg.Workspaces...)
 	}
 	if len(cfg.Workspaces) == 0 {
 		return cfg, ErrNoToken
+	}
+	for i := range cfg.Workspaces {
+		value := strings.ToLower(strings.TrimSpace(cfg.Workspaces[i].RootPages))
+		if value != "" && value != "recent" {
+			return Config{}, fmt.Errorf("root_pages must be empty or \"recent\"")
+		}
+		cfg.Workspaces[i].RootPages = value
 	}
 
 	cfg.Accent = raw.Accent

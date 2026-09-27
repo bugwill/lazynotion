@@ -12,7 +12,6 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 	"github.com/jomei/notionapi"
 
 	"github.com/justinm35/lazynotion/internal/cache"
@@ -45,13 +44,16 @@ type Workspace struct {
 	Client *notion.Client
 	// RootOnly limits the browse list to workspace-level pages; explicit
 	// searches still find nested pages
-	RootOnly bool
+	RootOnly  bool
+	RootPages string
 }
 
 type pagesMsg struct {
-	pages []notion.Page
-	query string
-	wsGen int
+	pages      []notion.Page
+	query      string
+	wsGen      int
+	fromCache  bool
+	background bool
 }
 
 type pageMsg struct {
@@ -92,6 +94,7 @@ type historyEntry struct {
 	page   notion.Page
 	cursor int
 	offset int
+	recent *recentState
 	db     *dbState
 }
 
@@ -124,10 +127,15 @@ func (i pageItem) FilterValue() string { return i.page.Title }
 
 type Model struct {
 	client         *notion.Client
+	recent         *recentState
 	store          *cache.Store
 	workspaces     []Workspace
 	wsIndex        int
 	wsGen          int
+	pagesQuery     *queryState
+	recentQuery    *queryState
+	recentLoader   *recentLoader
+	recentSequence uint64
 	sidebar        list.Model
 	viewer         viewport.Model
 	pv             pageView
@@ -135,6 +143,10 @@ type Model struct {
 	editArea       textarea.Model
 	editing        bool
 	editOrig       string
+	editAnchor     int
+	editScroll     int // mirrors the textarea's private vertical offset
+	editDragging   bool
+	editUndo       []editUndoState
 	mode           inputMode
 	focus          focusArea
 	loading        bool
@@ -143,6 +155,7 @@ type Model struct {
 	selected       *notion.Page
 	db             *dbState // non-nil: the viewer shows a database grid
 	defaultPages   []notion.Page
+	startupPending bool
 	renderedID     string
 	history        []historyEntry
 	pendingRestore *cursorRestore
@@ -158,6 +171,8 @@ type Model struct {
 	showHelp       bool
 	undoStack      []undoRecord
 	visualAnchor   int
+	readSelection  *readingSelection
+	readPending    *readingPress
 	moveQueue      []moveOp
 	moveSyncing    bool
 	writesInFlight int
@@ -178,7 +193,7 @@ type Model struct {
 // New builds the app model; store may be nil (caching disabled).
 // imagesMode is "auto" (detect kitty/ghostty), "pixels" or "mosaic".
 func New(workspaces []Workspace, startIndex int, store *cache.Store, imagesMode string) Model {
-	sidebar := list.New(nil, pageDelegate{}, 0, 0)
+	sidebar := list.New([]list.Item{pageItem{page: recentPage}}, pageDelegate{}, 0, 0)
 	sidebar.SetShowTitle(false) // the pane border carries the title
 	sidebar.SetShowHelp(false)
 	sidebar.SetFilteringEnabled(false)
@@ -191,23 +206,34 @@ func New(workspaces []Workspace, startIndex int, store *cache.Store, imagesMode 
 	// editor itself doesn't need Notion's per-run cap
 	editArea.CharLimit = 0
 
-	return Model{
-		client:       workspaces[startIndex].Client,
-		store:        store,
-		workspaces:   workspaces,
-		wsIndex:      startIndex,
-		sidebar:      sidebar,
-		viewer:       viewport.New(0, 0),
-		input:        textinput.New(),
-		editArea:     editArea,
-		loading:      true,
-		blockCache:   make(map[string][]notion.BlockNode),
-		images:       make(map[string]image.Image),
-		imagesMode:   imagesMode,
-		kittyImgs:    make(map[string]kittyPlacement),
-		collapsed:    make(map[string]bool),
-		visualAnchor: -1,
+	m := Model{
+		client:         workspaces[startIndex].Client,
+		recentLoader:   &recentLoader{},
+		store:          store,
+		workspaces:     workspaces,
+		wsIndex:        startIndex,
+		sidebar:        sidebar,
+		viewer:         viewport.New(0, 0),
+		input:          textinput.New(),
+		editArea:       editArea,
+		loading:        true,
+		startupPending: true,
+		blockCache:     make(map[string][]notion.BlockNode),
+		images:         make(map[string]image.Image),
+		imagesMode:     imagesMode,
+		kittyImgs:      make(map[string]kittyPlacement),
+		collapsed:      make(map[string]bool),
+		visualAnchor:   -1,
+		editAnchor:     -1,
 	}
+	if startsInRecent(workspaces[startIndex].RootPages) {
+		m.selected = &recentPage
+		m.recent = &recentState{}
+		m.focus = focusViewer
+		m.pageLoading = true
+		m.startupPending = false
+	}
+	return m
 }
 
 func sidebarTitle(workspaces []Workspace, index int) string {
@@ -223,11 +249,19 @@ func (m Model) switchWorkspace() (tea.Model, tea.Cmd) {
 	}
 	m.wsIndex = (m.wsIndex + 1) % len(m.workspaces)
 	m.wsGen++
+	m.recentLoader.cancel()
+	if m.pagesQuery != nil && m.pagesQuery.cancel != nil {
+		m.pagesQuery.cancel()
+	}
+	m.pagesQuery, m.recentQuery = nil, nil
 	ws := m.workspaces[m.wsIndex]
 	m.client = ws.Client
 	m.selected = nil
 	m.db = nil
+	m.recent = nil
 	m.history = nil
+	m.defaultPages = nil
+	m.startupPending = true
 	m.renderedID = ""
 	m.pv = pageView{}
 	m.blockCache = make(map[string][]notion.BlockNode)
@@ -244,22 +278,43 @@ func (m Model) switchWorkspace() (tea.Model, tea.Cmd) {
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(m.loadPages(""), func() tea.Msg { return measureMem() })
+	cmds := []tea.Cmd{m.loadPages(""), func() tea.Msg { return measureMem() }}
+	if m.recent != nil {
+		cmds = append(cmds, m.loadRecent(false))
+	}
+	return tea.Batch(cmds...)
 }
 
 func (m Model) loadPages(query string) tea.Cmd {
+	return m.fetchPages(query, false)
+}
+
+func (m Model) fetchPages(query string, force bool) tea.Cmd {
 	client, gen := m.client, m.wsGen
 	// the root filter shapes the browse list only; a typed search should
 	// still reach nested pages
 	rootOnly := m.workspaces[m.wsIndex].RootOnly && strings.TrimSpace(query) == ""
+	store := m.store
+	key := ""
+	if client != nil {
+		key = fmt.Sprintf("%s:%t:%s", client.CacheKey(), rootOnly, query)
+	}
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		pages, err := client.Search(ctx, query, rootOnly)
-		if err != nil {
-			return errMsg{err}
+		if !force && store != nil {
+			if pages, ok := store.LoadPages(key); ok {
+				return pagesMsg{pages: pages, query: query, wsGen: gen, fromCache: true}
+			}
 		}
-		return pagesMsg{pages: pages, query: query, wsGen: gen}
+		return streamQueryWithContext("pages", gen, 30*time.Second, func(ctx context.Context, report func(notion.QueryProgress)) tea.Msg {
+			pages, err := client.SearchWithProgress(ctx, query, rootOnly, report)
+			if err != nil {
+				return errMsg{err}
+			}
+			if store != nil {
+				_ = store.SavePages(key, pages)
+			}
+			return pagesMsg{pages: pages, query: query, wsGen: gen, background: force}
+		})
 	}
 }
 
@@ -346,6 +401,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if !ok {
 		return next, cmd
 	}
+	if model.readSelection != nil && (model.selected == nil || model.selected.ID != model.readSelection.pageID || model.editing || model.db != nil || model.recent != nil) {
+		model.readSelection = nil
+	}
+	if model.readPending != nil && (model.selected == nil || model.selected.ID != model.readPending.pageID || model.editing || model.db != nil || model.recent != nil) {
+		model.readPending = nil
+	}
 	if model.syncing() && !model.pulsing {
 		model.pulsing = true
 		return model, tea.Batch(cmd, nextPulseTick())
@@ -355,6 +416,70 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.MouseMsg:
+		if m.editing && !m.showHelp && !m.paletteOpen && m.confirm == nil && m.mode == inputNone {
+			return m.updateEditorMouse(msg)
+		}
+		if !m.editing && !m.showHelp && !m.paletteOpen && m.confirm == nil && m.mode == inputNone {
+			if m.readPending != nil && (msg.Action == tea.MouseActionMotion || msg.Action == tea.MouseActionRelease) {
+				return m.continueReadingPress(msg)
+			}
+			if m.readSelection != nil && !m.readSelection.dragging && msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress {
+				return m.startReadingPress(msg)
+			}
+		}
+		if m.readSelection != nil && m.readSelection.dragging && !m.editing && !m.showHelp && !m.paletteOpen && m.mode == inputNone && m.confirm == nil && (msg.Action == tea.MouseActionMotion || msg.Action == tea.MouseActionRelease) {
+			return m.updateReadingMouse(msg)
+		}
+		if m.showHelp || m.paletteOpen || m.editing || m.confirm != nil || m.mode != inputNone ||
+			msg.X <= 0 || msg.X >= m.width-1 || msg.Y <= 0 || msg.Y >= m.height-m.footerHeight()-1 {
+			return m, nil
+		}
+		switch msg.Button {
+		case tea.MouseButtonLeft:
+			if msg.Action == tea.MouseActionPress {
+				return m.activateMouseRow(msg)
+			}
+		case tea.MouseButtonWheelUp, tea.MouseButtonWheelDown:
+			// Mobile users navigate in the finger's direction: a downward
+			// swipe (wheel-up input) advances. One row per event keeps lists
+			// controllable when Whip emits several events per gesture.
+			step := 1
+			if msg.Button == tea.MouseButtonWheelDown {
+				step = -step
+			}
+			if m.selected == nil && m.focus == focusSidebar {
+				count := len(m.sidebar.VisibleItems())
+				if count > 0 {
+					m.sidebar.Select(clamp(m.sidebar.Index()+step, 0, count-1))
+				}
+				return m, nil
+			}
+			if m.focus != focusViewer {
+				return m, nil
+			}
+			if m.recent != nil {
+				m.recent.cursor = clamp(m.recent.cursor+step, 0, max(len(m.recent.pages)-1, 0))
+				return m, nil
+			}
+			if m.db != nil {
+				m.db.cursor = clamp(m.db.cursor+step, 0, max(len(m.db.rows)-1, 0))
+				return m, nil
+			}
+			if m.selected != nil {
+				// Content follows standard wheel direction; lists above move
+				// their cursor in the tablet finger's direction.
+				step = -step
+				if step < 0 {
+					m.viewer.ScrollUp(-step)
+				} else {
+					m.viewer.ScrollDown(step)
+				}
+			}
+		}
+		return m, nil
+	case queryEvent:
+		return m.handleQueryEvent(msg)
 	case pulseMsg:
 		if !m.syncing() {
 			m.pulsing = false
@@ -364,18 +489,31 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nextPulseTick()
 
 	case tea.WindowSizeMsg:
+		m.readPending = nil
 		m.width, m.height = msg.Width, msg.Height
 		m.layout()
 		m.rebuildPage(true)
+		if m.editing {
+			if unit, ok := m.pv.current(); ok {
+				m.editArea.SetWidth(max(m.viewer.Width-gutterWidth-2*unit.Depth, 20))
+				m.resizeEditArea()
+				m.settleEditScroll()
+				m.syncViewer()
+			}
+		}
 		return m, nil
 
 	case pagesMsg:
+		if msg.background && msg.query != m.lastQuery {
+			return m, nil
+		}
 		if msg.wsGen != m.wsGen {
 			return m, nil
 		}
 		m.loading = false
 		m.lastQuery = msg.query
 		if msg.query == "" {
+			msg.pages = withRecent(msg.pages)
 			m.defaultPages = msg.pages
 		}
 		prevID := ""
@@ -394,7 +532,21 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				break
 			}
 		}
-		return m, cmd
+		cmds := []tea.Cmd{cmd}
+		if msg.fromCache {
+			cmds = append(cmds, m.fetchPages(msg.query, true))
+		}
+		if msg.query == "" && m.startupPending {
+			m.startupPending = false
+			if startsInRecent(m.workspaces[m.wsIndex].RootPages) {
+				next, openCmd := m.openRecent()
+				return next, tea.Batch(append(cmds, openCmd)...)
+			}
+		}
+		return m, tea.Batch(cmds...)
+
+	case recentMsg:
+		return m.handleRecent(msg)
 
 	case pageMsg:
 		if msg.wsGen != m.wsGen {
@@ -407,6 +559,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.selected != nil && m.selected.ID == msg.pageID && m.localBusy() {
 			m.pageLoading = false
 			return m, nil
+		}
+		if !msg.fromCache {
+			m.recentLoader.remember(m.client, m.store, msg.page, false)
 		}
 		m.blockCache[msg.pageID] = msg.blocks
 		selected := m.selected != nil && m.selected.ID == msg.pageID
@@ -480,6 +635,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case writeDoneMsg:
 		m.writesInFlight = max(m.writesInFlight-1, 0)
 		m.statusMsg = msg.status
+		if m.selected != nil && m.selected.ID == msg.pageID {
+			m.recentLoader.remember(m.client, m.store, *m.selected, true)
+		}
 		if m.store != nil {
 			m.store.Invalidate(msg.pageID)
 		}
@@ -509,6 +667,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case pageCreatedMsg:
 		m.statusMsg = fmt.Sprintf("created %q", msg.page.Title)
+		recentCreated := msg.page
+		recentCreated.ParentType, recentCreated.ParentID = "page_id", msg.parentID
+		m.recentLoader.remember(m.client, m.store, recentCreated, true)
 		if msg.parentID != "" {
 			delete(m.blockCache, msg.parentID)
 			if m.store != nil {
@@ -552,6 +713,17 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		m.statusMsg = ""
+		m.readPending = nil
+		if m.readSelection != nil && !m.editing && m.mode == inputNone && !m.showHelp && !m.paletteOpen && m.confirm == nil {
+			if msg.String() == "b" {
+				return m.boldReadingSelection()
+			}
+			m.readSelection = nil
+			m.viewerSetContent()
+			if msg.String() == "esc" {
+				return m, nil
+			}
+		}
 		if m.showHelp {
 			if msg.String() == "ctrl+c" {
 				return m, tea.Quit
@@ -612,6 +784,11 @@ func (m Model) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m Model) submitInput(mode inputMode, value string) (tea.Model, tea.Cmd) {
 	switch mode {
 	case inputSearch:
+		m.selected = nil
+		m.db = nil
+		m.recent = nil
+		m.history = nil
+		m.focus = focusSidebar
 		m.loading = true
 		m.err = nil
 		return m, m.loadPages(value)
@@ -727,62 +904,13 @@ func (m Model) startInlineEdit() (tea.Model, tea.Cmd) {
 	}
 	m.editing = true
 	m.editOrig = text
-	m.editArea.SetValue(text)
+	m.editAnchor = -1
+	m.editUndo = nil
+	m.setEditValue(text)
 	m.editArea.SetWidth(max(m.viewer.Width-gutterWidth-2*unit.Depth, 20))
 	m.resizeEditArea()
 	m.syncViewer()
 	return m, m.editArea.Focus()
-}
-
-func (m Model) updateInlineEdit(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if m.paletteOpen {
-		return m.updatePalette(msg)
-	}
-	if msg.String() == "/" && paletteTriggerOK(m.editArea.Value()) {
-		m.openPalette()
-		return m, nil
-	}
-	switch msg.String() {
-	case "esc":
-		value := m.editArea.Value()
-		m.stopInlineEdit()
-		return m.commitInlineEdit(value)
-	case "shift+enter", "alt+enter":
-		return m.saveAndContinue("")
-	case "enter":
-		// enter on a list item saves it and continues the list on a new
-		// block with the same marker; on an empty marker it ends the
-		// list; anywhere else it stays a plain newline
-		rows := strings.Split(m.editArea.Value(), "\n")
-		row := clamp(m.editArea.Line(), 0, len(rows)-1)
-		if marker, contentEmpty, isList := convert.ListContinuation(rows[row]); isList {
-			if contentEmpty {
-				rows[row] = ""
-				m.editArea.SetValue(strings.Join(rows, "\n"))
-				m.editArea.CursorEnd()
-				m.resizeEditArea()
-				m.syncViewer()
-				return m, nil
-			}
-			return m.saveAndContinue(marker)
-		}
-	case "ctrl+c":
-		m.stopInlineEdit()
-		m.statusMsg = "edit discarded"
-		if unit, ok := m.pv.current(); ok && unit.ID() == draftBlockID {
-			m.removeDraft()
-			m.rebuildPage(true)
-		} else {
-			m.syncViewer()
-		}
-		return m, nil
-	}
-	m.preGrowEditArea()
-	var cmd tea.Cmd
-	m.editArea, cmd = m.editArea.Update(msg)
-	m.resizeEditArea()
-	m.syncViewer()
-	return m, cmd
 }
 
 // yankSelection extracts the visual range (or just the cursor block) as
@@ -817,14 +945,15 @@ func blockYankText(u convert.Unit) string {
 // saveAndContinue commits the current block and opens a fresh draft below,
 // pre-seeded with a list marker when continuing a list.
 func (m Model) saveAndContinue(seed string) (tea.Model, tea.Cmd) {
-	value := m.editArea.Value()
-	m.stopInlineEdit()
-	next, cmd := m.commitInlineEdit(value)
+	next, cmd := m.saveInlineEdit()
 	model := next.(Model)
+	if model.editing {
+		return model, cmd
+	}
 	nextModel, newCmd := model.newBlockBelow()
 	continued := nextModel.(Model)
 	if continued.editing && seed != "" {
-		continued.editArea.SetValue(seed)
+		continued.setEditValue(seed)
 		continued.editArea.CursorEnd()
 		continued.resizeEditArea()
 		continued.syncViewer()
@@ -832,8 +961,24 @@ func (m Model) saveAndContinue(seed string) (tea.Model, tea.Cmd) {
 	return continued, tea.Batch(cmd, newCmd)
 }
 
+// Validation failures keep the editor open, including its selection and undo history.
+func (m Model) saveInlineEdit() (tea.Model, tea.Cmd) {
+	value, anchor, undo := m.editArea.Value(), m.editAnchor, m.editUndo
+	m.stopInlineEdit()
+	next, cmd := m.commitInlineEdit(value)
+	model := next.(Model)
+	if model.editing {
+		model.editAnchor, model.editUndo = anchor, undo
+		model.syncViewer()
+	}
+	return model, cmd
+}
+
 func (m *Model) stopInlineEdit() {
 	m.editing = false
+	m.editDragging = false
+	m.editAnchor = -1
+	m.editUndo = nil
 	m.editArea.Blur()
 	if m.paletteOpen {
 		m.closePalette()
@@ -849,12 +994,18 @@ func (m Model) commitInlineEdit(value string) (tea.Model, tea.Cmd) {
 	if unit.ID() == draftBlockID {
 		return m.commitDraft(unit, value)
 	}
-	if value == m.editOrig || strings.TrimSpace(value) == "" {
+	if value == m.editOrig {
 		m.syncViewer()
 		return m, nil
 	}
 	block := unit.Node.Block
 	if _, isTable := block.(*notionapi.TableBlock); isTable {
+		if strings.TrimSpace(value) == "" {
+			m.editing = true
+			m.statusMsg = "table edit must remain one markdown table"
+			m.syncViewer()
+			return m, m.editArea.Focus()
+		}
 		return m.commitTableEdit(unit, value)
 	}
 	patch := convert.ParseEditPatch(value)
@@ -1079,7 +1230,7 @@ func (m *Model) editAreaRows() int {
 	w := max(m.editArea.Width(), 1)
 	rows := 0
 	for _, line := range strings.Split(m.editArea.Value(), "\n") {
-		rows += max(1, (lipgloss.Width(line)+w-1)/w)
+		rows += len(wrapEditorLine([]rune(line), w))
 	}
 	return rows
 }
@@ -1353,25 +1504,47 @@ func (m Model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "q", "ctrl+c":
 		return m, tea.Quit
 	case "/":
-		if m.focus == focusViewer && m.selected != nil && m.db == nil {
+		if m.focus == focusViewer && m.selected != nil && m.db == nil && m.recent == nil {
 			return m.startInput(inputFind, "find in page: ", m.findQuery)
+		}
+		if m.selected != nil {
+			// Recent and databases have no in-page text search. Return to the
+			// visible root list before starting a global search so focus never
+			// points at the hidden sidebar.
+			m.selected = nil
+			m.db = nil
+			m.recent = nil
+			m.history = nil
+			m.focus = focusSidebar
+			m.pv = pageView{}
+			m.renderedID = ""
+			m.pageLoading = false
+			m.viewer.SetContent("")
+			m.layout()
 		}
 		return m.startInput(inputSearch, "search: ", "")
 	case "u":
 		return m.undo()
 	case "tab":
-		if m.focus == focusSidebar {
+		if m.selected != nil {
 			m.focus = focusViewer
-		} else {
-			m.focus = focusSidebar
+			return m, nil
 		}
-		m.rebuildPage(false)
+		m.focus = focusSidebar
 		return m, nil
 	case "1":
+		if m.selected != nil {
+			m.focus = focusViewer
+			return m, nil
+		}
 		m.focus = focusSidebar
 		m.rebuildPage(false)
 		return m, nil
 	case "2":
+		if m.selected == nil {
+			m.focus = focusSidebar
+			return m, nil
+		}
 		m.focus = focusViewer
 		m.rebuildPage(false)
 		return m, nil
@@ -1385,16 +1558,28 @@ func (m Model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.focus == focusViewer && len(m.history) > 0 {
 			entry := m.history[len(m.history)-1]
 			m.history = m.history[:len(m.history)-1]
+			if entry.recent != nil {
+				m.recent = entry.recent
+				m.selected = &recentPage
+				m.db = nil
+				m.focus = focusViewer
+				m.layout()
+				return m, nil
+			}
 			if entry.db != nil {
 				// back into a database grid, exactly as it was left
 				m.db = entry.db
 				m.selected = &entry.db.ref
 				m.pendingRestore = nil
+				m.focus = focusViewer
+				m.layout()
 				return m, nil
 			}
 			m.db = nil
+			m.recent = nil
 			next, cmd := m.openPage(entry.page)
 			model := next.(Model)
+			model.layout()
 			model.pendingRestore = &cursorRestore{
 				pageID: entry.page.ID,
 				cursor: entry.cursor,
@@ -1404,9 +1589,31 @@ func (m Model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return model, cmd
 		}
 		m.focus = focusSidebar
+		if m.selected != nil {
+			m.selected = nil
+			m.db = nil
+			m.recent = nil
+			m.history = nil
+			m.pv = pageView{}
+			m.renderedID = ""
+			m.pageLoading = false
+			m.viewer.SetContent("")
+			m.layout()
+		}
 		m.rebuildPage(false)
 		return m, nil
+	case "R":
+		if m.recent != nil {
+			return m, func() tea.Msg {
+				m.recentLoader.requestDeep(m.client, m.store)
+				return m.recentLoader.load(m.client, m.store, m.wsGen, true)
+			}
+		}
+		return m, nil
 	case "r":
+		if m.focus == focusViewer && m.recent != nil {
+			return m, m.loadRecent(true)
+		}
 		m.err = nil
 		if m.focus == focusViewer && m.db != nil {
 			return m.refreshDatabaseView()
@@ -1424,13 +1631,23 @@ func (m Model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// sidebar: full refresh — page list plus the open page
 		m.loading = true
 		m.blockCache = make(map[string][]notion.BlockNode)
-		cmds := []tea.Cmd{m.loadPages(m.lastQuery)}
-		if m.selected != nil {
+		cmds := []tea.Cmd{m.fetchPages(m.lastQuery, true)}
+		if m.recent != nil {
+			cmds = append(cmds, m.loadRecent(true))
+		} else if m.db != nil {
+			cmds = append(cmds, m.fetchDatabaseView(m.db.ref, true))
+		} else if m.selected != nil {
 			m.pageLoading = true
 			cmds = append(cmds, m.loadPage(*m.selected, true))
 		}
 		return m, tea.Batch(cmds...)
 	case "ctrl+o":
+		if m.recent != nil {
+			if len(m.recent.pages) > 0 {
+				return m, openInBrowser(m.recent.pages[m.recent.cursor].URL)
+			}
+			return m, nil
+		}
 		if m.selected != nil {
 			return m, openInBrowser(m.selected.URL)
 		}
@@ -1438,6 +1655,9 @@ func (m Model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "n":
 		if m.focus == focusSidebar {
 			return m.startNewPageInput()
+		}
+		if m.recent != nil {
+			return m, nil
 		}
 		if m.db != nil {
 			m.statusMsg = "database view is read-only for now — enter opens the row"
@@ -1452,7 +1672,7 @@ func (m Model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.showHelp = true
 		return m, nil
 	case "v":
-		if m.focus == focusViewer && m.selected != nil && m.db == nil && len(m.pv.units) > 0 {
+		if m.focus == focusViewer && m.selected != nil && m.db == nil && m.recent == nil && len(m.pv.units) > 0 {
 			if m.visualAnchor >= 0 {
 				m.visualAnchor = -1
 				m.statusMsg = ""
@@ -1464,6 +1684,12 @@ func (m Model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "y":
+		if m.focus == focusViewer && m.recent != nil {
+			if len(m.recent.pages) > 0 {
+				return m, copyCmd(m.recent.pages[m.recent.cursor].URL, "page link copied")
+			}
+			return m, nil
+		}
 		if m.focus == focusSidebar {
 			if item, ok := m.sidebar.SelectedItem().(pageItem); ok {
 				return m, copyCmd(item.page.URL, "page link copied")
@@ -1488,11 +1714,14 @@ func (m Model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, copyCmd(text, label)
 	case "I":
-		if m.focus == focusViewer && m.selected != nil && m.db == nil {
+		if m.focus == focusViewer && m.selected != nil && m.db == nil && m.recent == nil {
 			return m.startInput(inputIcon, `page icon (emoji or "name color"): `, "")
 		}
 		return m, nil
 	case "Y":
+		if m.recent != nil {
+			return m, nil
+		}
 		if m.focus != focusViewer || m.selected == nil {
 			return m, nil
 		}
@@ -1507,6 +1736,9 @@ func (m Model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.focus == focusSidebar {
 			return m.openSelectedPage()
 		}
+		if m.recent != nil {
+			return m.openRecentItem()
+		}
 		if m.db != nil {
 			return m.openDBRow()
 		}
@@ -1514,6 +1746,9 @@ func (m Model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	if m.focus == focusViewer {
+		if m.recent != nil {
+			return m.updateRecentKeys(msg)
+		}
 		if m.db != nil {
 			return m.updateDBKeys(msg)
 		}
@@ -1588,6 +1823,10 @@ func (m Model) startNewPageInput() (tea.Model, tea.Cmd) {
 		m.statusMsg = "highlight a parent page first — the API can't create workspace-root pages"
 		return m, nil
 	}
+	if item.page.ID == recentID {
+		m.statusMsg = "select a parent page to create a child"
+		return m, nil
+	}
 	if item.page.Kind == notion.KindDataSource {
 		m.statusMsg = "creating database rows isn't supported yet"
 		return m, nil
@@ -1611,6 +1850,10 @@ func (m Model) openSelectedPage() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.history = nil
+	m.startupPending = false
+	if item.page.ID == recentID {
+		return m.openRecent()
+	}
 
 	// opening a search result leaves search mode: restore the default
 	// list right away (from the cached copy) and refresh it quietly
@@ -1698,8 +1941,10 @@ func (m Model) openChildPage() (tea.Model, tea.Cmd) {
 func (m Model) openPage(page notion.Page) (tea.Model, tea.Cmd) {
 	m.pendingRestore = nil
 	m.db = nil
+	m.recent = nil
 	m.selected = &page
 	m.focus = focusViewer
+	m.layout()
 	m.pv.cursor = 0
 	m.viewer.GotoTop()
 	if _, cached := m.blockCache[page.ID]; cached {
@@ -1788,6 +2033,7 @@ func (m *Model) rebuildPage(rerender bool) {
 		m.pv.kitty = m.kittyImgs
 		header := strings.Join(m.coverLines(), "\n")
 		m.pv.setUnits(header, convert.FlattenFolded(blocks, m.collapsed), m.viewer.Width, m.images)
+		m.refreshReadingMaps()
 		m.renderedID = m.selected.ID
 	}
 	m.viewerSetContent()
@@ -1819,7 +2065,7 @@ func (m Model) localBusy() bool {
 // create/move queue, tracked block writes, or page/sidebar loads.
 func (m Model) syncing() bool {
 	return m.moveSyncing || len(m.moveQueue) > 0 || m.writesInFlight > 0 ||
-		m.pageLoading || m.loading
+		m.pageLoading || m.loading || m.pagesQuery != nil || m.recentQuery != nil
 }
 
 // viewerSetContent pushes the assembled page into the viewport, padded
@@ -1829,6 +2075,9 @@ func (m *Model) viewerSetContent() {
 	m.pv.visualOn = m.visualAnchor >= 0
 	m.pv.visualAnchor = max(m.visualAnchor, 0)
 	content := m.pv.assemble(m.focus == focusViewer, m.editLines())
+	if m.readSelection != nil && !m.editing {
+		content = m.highlightReadingSelection(content)
+	}
 	if pad := m.viewer.Height / 2; pad > 0 {
 		content += strings.Repeat("\n", pad)
 	}
@@ -1844,7 +2093,11 @@ func (m *Model) editLines() []string {
 	if !m.editing {
 		return nil
 	}
-	return strings.Split(m.editArea.View(), "\n")
+	view := m.editArea.View()
+	if m.editAnchor >= 0 {
+		view = highlightEditSelection(view, m.editArea.Value(), m.editArea.Width(), m.editAnchor, m.editCursorIndex(), m.editScroll)
+	}
+	return strings.Split(view, "\n")
 }
 
 func (m Model) footerHeight() int {
@@ -1855,12 +2108,15 @@ func (m Model) footerHeight() int {
 }
 
 func (m *Model) layout() {
-	paneHeight := m.height - m.footerHeight()
-	sidebarWidth := clamp(m.width/3, 24, 40)
-	viewerWidth := m.width - sidebarWidth
-	m.sidebar.SetSize(sidebarWidth-2, paneHeight-2)
-	m.viewer.Width = viewerWidth - 2
-	m.viewer.Height = paneHeight - 2
+	paneHeight := max(m.height-m.footerHeight(), 0)
+	if m.selected == nil {
+		m.sidebar.SetSize(max(m.width-2, 1), max(paneHeight-4, 0))
+		m.viewer.Width = max(m.width-2, 1)
+	} else {
+		m.sidebar.SetSize(0, 0)
+		m.viewer.Width = max(m.width-2, 1)
+	}
+	m.viewer.Height = max(paneHeight-2, 0)
 	m.input.Width = m.width - 12
 }
 

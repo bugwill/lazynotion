@@ -61,7 +61,7 @@ func SetLocalRichText(block notionapi.Block, rts []notionapi.RichText) bool {
 }
 
 func (c *Client) update(ctx context.Context, id string, req *notionapi.BlockUpdateRequest) error {
-	if err := c.limiter.Wait(ctx); err != nil {
+	if err := c.waitRequest(ctx); err != nil {
 		return err
 	}
 	_, err := c.api.Block.Update(ctx, notionapi.BlockID(id), req)
@@ -147,7 +147,7 @@ func (c *Client) SetBlockRichText(ctx context.Context, block notionapi.Block, rt
 // CreatePage creates an empty page under parentID (the API cannot create
 // workspace-root pages, so a parent page is required).
 func (c *Client) CreatePage(ctx context.Context, parentID, title string) (Page, error) {
-	if err := c.limiter.Wait(ctx); err != nil {
+	if err := c.waitRequest(ctx); err != nil {
 		return Page{}, err
 	}
 	created, err := c.api.Page.Create(ctx, &notionapi.PageCreateRequest{
@@ -172,7 +172,7 @@ func (c *Client) CreatePage(ctx context.Context, parentID, title string) (Page, 
 
 // DeleteBlock archives a block (Notion moves it to Trash, restorable).
 func (c *Client) DeleteBlock(ctx context.Context, blockID string) error {
-	if err := c.limiter.Wait(ctx); err != nil {
+	if err := c.waitRequest(ctx); err != nil {
 		return err
 	}
 	_, err := c.api.Block.Delete(ctx, notionapi.BlockID(blockID))
@@ -189,7 +189,7 @@ func (c *Client) RestoreBlock(ctx context.Context, blockID string) error {
 // AppendBlocks adds blocks to parentID, after the given block if afterID is
 // non-empty, otherwise at the bottom of the page. Returns created block IDs.
 func (c *Client) AppendBlocks(ctx context.Context, parentID, afterID string, blocks []notionapi.Block) ([]string, error) {
-	if err := c.limiter.Wait(ctx); err != nil {
+	if err := c.waitRequest(ctx); err != nil {
 		return nil, err
 	}
 	resp, err := c.api.Block.AppendChildren(ctx, notionapi.BlockID(parentID), &notionapi.AppendBlockChildrenRequest{
@@ -213,7 +213,7 @@ func (c *Client) ReplacePageBlocks(ctx context.Context, pageID string, blocks []
 	var existing []string
 	var cursor notionapi.Cursor
 	for {
-		if err := c.limiter.Wait(ctx); err != nil {
+		if err := c.waitRequest(ctx); err != nil {
 			return err
 		}
 		resp, err := c.api.Block.GetChildren(ctx, notionapi.BlockID(pageID), &notionapi.Pagination{
@@ -238,7 +238,7 @@ func (c *Client) ReplacePageBlocks(ctx context.Context, pageID string, blocks []
 	}
 
 	for _, id := range existing {
-		if err := c.limiter.Wait(ctx); err != nil {
+		if err := c.waitRequest(ctx); err != nil {
 			return err
 		}
 		if _, err := c.api.Block.Delete(ctx, notionapi.BlockID(id)); err != nil {
@@ -248,7 +248,7 @@ func (c *Client) ReplacePageBlocks(ctx context.Context, pageID string, blocks []
 
 	for start := 0; start < len(blocks); start += 100 {
 		end := min(start+100, len(blocks))
-		if err := c.limiter.Wait(ctx); err != nil {
+		if err := c.waitRequest(ctx); err != nil {
 			return err
 		}
 		if _, err := c.api.Block.AppendChildren(ctx, notionapi.BlockID(pageID), &notionapi.AppendBlockChildrenRequest{

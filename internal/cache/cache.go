@@ -3,7 +3,9 @@
 package cache
 
 import (
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"time"
@@ -15,6 +17,50 @@ import (
 
 type Store struct {
 	dir string
+}
+
+// SavePages persists browse/search metadata separately from page block trees.
+func (s *Store) SavePages(key string, pages []notion.Page) error {
+	return s.SaveMetadata("pages:"+key, pages)
+}
+
+func (s *Store) SaveMetadata(key string, value any) error {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	path := s.pagesPath(key)
+	f, err := os.CreateTemp(s.dir, "list-*.tmp")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	if _, err = f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	if err = f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(f.Name(), path)
+}
+
+func (s *Store) pagesPath(key string) string {
+	return filepath.Join(s.dir, fmt.Sprintf("list-%x.json", sha256.Sum256([]byte(key))))
+}
+
+func (s *Store) LoadPages(key string) ([]notion.Page, bool) {
+	var pages []notion.Page
+	ok := s.LoadMetadata("pages:"+key, &pages)
+	return pages, ok
+}
+
+func (s *Store) LoadMetadata(key string, value any) bool {
+	data, err := os.ReadFile(s.pagesPath(key))
+	if err != nil {
+		return false
+	}
+	return json.Unmarshal(data, value) == nil
 }
 
 func Open() (*Store, error) {

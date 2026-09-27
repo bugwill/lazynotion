@@ -24,7 +24,7 @@ func (c *Client) childBlocks(ctx context.Context, id notionapi.BlockID, depth in
 	var nodes []BlockNode
 	var cursor notionapi.Cursor
 	for {
-		if err := c.limiter.Wait(ctx); err != nil {
+		if err := c.waitRequest(ctx); err != nil {
 			return nil, err
 		}
 		resp, err := c.api.Block.GetChildren(ctx, id, &notionapi.Pagination{

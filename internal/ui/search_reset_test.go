@@ -36,7 +36,7 @@ func TestOpeningSearchResultRestoresDefaultList(t *testing.T) {
 	if m.lastQuery != "" {
 		t.Errorf("lastQuery = %q, want cleared", m.lastQuery)
 	}
-	if len(m.sidebar.Items()) != 3 {
+	if len(m.sidebar.Items()) != 4 {
 		t.Errorf("sidebar should restore the default list, has %d items", len(m.sidebar.Items()))
 	}
 	if it, ok := m.sidebar.SelectedItem().(pageItem); !ok || it.page.ID != "p2" {
@@ -52,7 +52,7 @@ func TestOpeningSearchResultRestoresDefaultList(t *testing.T) {
 
 func TestBackgroundRefreshKeepsSelection(t *testing.T) {
 	m := searchModel(t)
-	m.sidebar.Select(1) // Beta
+	m.sidebar.Select(2) // Beta (after Library and Alpha)
 
 	next, _ := m.Update(pagesMsg{pages: []notion.Page{
 		{ID: "p0", Title: "New"}, {ID: "p1", Title: "Alpha"},

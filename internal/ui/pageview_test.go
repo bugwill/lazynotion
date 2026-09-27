@@ -132,6 +132,35 @@ func TestParagraphNewlinesRenderAsLines(t *testing.T) {
 	}
 }
 
+func TestNotionStrongCJKWithAdjacentPunctuationAndRuns(t *testing.T) {
+	strong := &notionapi.Annotations{Bold: true}
+	nodes := []notion.BlockNode{{Block: &notionapi.ParagraphBlock{Paragraph: notionapi.Paragraph{RichText: []notionapi.RichText{
+		{PlainText: "捕捉历史性机会：", Annotations: strong},
+		{PlainText: "过去其实有很多大机会，"},
+		{PlainText: "反思", Annotations: strong},
+		{PlainText: "与", Annotations: strong},
+		{PlainText: "验证。"},
+		{PlainText: "重点：\n第二行", Annotations: strong},
+	}}}}}
+	markdown := convert.ToMarkdown(nodes)
+	if !strings.Contains(markdown, "**捕捉历史性机会：**过去") || !strings.Contains(markdown, "**反思与**验证。") || !strings.Contains(markdown, "**重点：**  \n**第二行**") {
+		t.Fatalf("bold Markdown lost a CJK span, adjacent run, or hard break: %q", markdown)
+	}
+	var pv pageView
+	pv.setUnits("p", convert.Flatten(nodes), 80, nil)
+	rendered := strings.Join(pv.rendered[0], "\n")
+	plain := stripAnsi(rendered)
+	if strings.Contains(plain, "**") || strings.Contains(plain, "\u2060") {
+		t.Fatalf("Markdown delimiters or rendering hints leaked into output: %q", plain)
+	}
+	if !strings.Contains(rendered, ";1m捕捉历史性机会：") || !strings.Contains(rendered, ";1m反思与") || !strings.Contains(rendered, ";1m第二行") {
+		t.Fatalf("CJK strong spans did not render bold: %q", rendered)
+	}
+	if !strings.Contains(plain, "捕捉历史性机会：过去") || !strings.Contains(plain, "反思与验证。") {
+		t.Fatalf("rendering changed CJK punctuation or plain suffix: %q", plain)
+	}
+}
+
 var ansiRe = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 
 func stripAnsi(s string) string {

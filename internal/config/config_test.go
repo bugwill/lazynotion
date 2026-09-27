@@ -114,3 +114,27 @@ root_pages_only = false
 		t.Error("work should override root_pages_only to false")
 	}
 }
+
+func TestRootPagesRecent(t *testing.T) {
+	cfg, err := loadWith(t, `
+root_pages = "recent"
+[workspaces.personal]
+token = "dummy"
+[workspaces.work]
+token = "dummy-work"
+root_pages = ""
+`, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Workspaces[0].RootPages != "recent" || cfg.Workspaces[1].RootPages != "" {
+		t.Fatal("root_pages should inherit and allow a workspace override")
+	}
+}
+
+func TestRootPagesRejectsLibrary(t *testing.T) {
+	if _, err := loadWith(t, `token = "dummy"
+root_pages = "library"`, ""); err == nil {
+		t.Fatal("library must no longer be accepted")
+	}
+}

@@ -2,6 +2,9 @@ package notion
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"golang.org/x/time/rate"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -48,7 +51,11 @@ const searchFixture = `{
       "last_edited_time": "2026-07-01T07:00:00.000Z",
       "icon": {"type": "emoji", "emoji": "📋"},
       "parent": {"type": "database_id", "database_id": "db-1"},
-      "title": [{"plain_text": "Tasks"}]
+      "title": [{"plain_text": "Tasks"}],
+      "properties": {
+        "Name": {"type": "title", "title": {}},
+        "Status": {"type": "status", "status": {"options": []}}
+      }
     }
   ],
   "has_more": false,
@@ -112,5 +119,51 @@ func TestSearchRootOnlyFiltersNestedPages(t *testing.T) {
 	// database, so the workspace-root test can't apply to them)
 	if len(pages) != 2 || pages[0].ID != "page-1" || pages[1].ID != "ds-1" {
 		t.Fatalf("root-only should keep the workspace-level page and the data source, got %+v", pages)
+	}
+}
+
+func TestRecentIsBoundedAndSorted(t *testing.T) {
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			w.Write([]byte(`{"results":[],"has_more":false}`))
+			return
+		}
+		requests++
+		var request struct {
+			Query string `json:"query"`
+			Sort  struct {
+				Direction string `json:"direction"`
+				Timestamp string `json:"timestamp"`
+			} `json:"sort"`
+			Cursor string `json:"start_cursor"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Error(err)
+		}
+		if request.Query != "" || request.Sort.Direction != "descending" || request.Sort.Timestamp != "last_edited_time" {
+			t.Error("Recent must request newest edits across all titles")
+		}
+		if requests == 2 && request.Cursor != "cursor-1" {
+			t.Error("Recent must paginate with the returned cursor")
+		}
+		var results []map[string]any
+		for i := 0; i < 50; i++ {
+			results = append(results, map[string]any{"object": "page", "id": fmt.Sprintf("page-%d-%d", requests, i), "parent": map[string]any{"type": "page_id"}})
+		}
+		json.NewEncoder(w).Encode(map[string]any{"results": results, "has_more": requests < 3, "next_cursor": fmt.Sprintf("cursor-%d", requests)})
+	}))
+	defer srv.Close()
+	old := apiBase
+	apiBase = srv.URL
+	defer func() { apiBase = old }()
+	client := NewClient("dummy")
+	client.limiter.SetLimit(rate.Inf)
+	pages, err := client.Recent(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pages) != 100 || requests != 3 {
+		t.Fatalf("Recent should include nested pages and stop at 100: %d pages, %d requests", len(pages), requests)
 	}
 }

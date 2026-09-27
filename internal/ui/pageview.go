@@ -1,16 +1,26 @@
 package ui
 
 import (
+	"bytes"
 	"image"
 	"strings"
 	"sync"
+	"unicode"
 
 	"github.com/charmbracelet/bubbles/viewport"
-	"github.com/charmbracelet/glamour"
+	glamouransi "github.com/charmbracelet/glamour/ansi"
 	"github.com/charmbracelet/glamour/styles"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/jomei/notionapi"
-	"github.com/muesli/reflow/wrap"
+	"github.com/muesli/termenv"
+	"github.com/yuin/goldmark"
+	"github.com/yuin/goldmark/ast"
+	"github.com/yuin/goldmark/extension"
+	"github.com/yuin/goldmark/parser"
+	"github.com/yuin/goldmark/renderer"
+	"github.com/yuin/goldmark/text"
+	"github.com/yuin/goldmark/util"
 
 	"github.com/justinm35/lazynotion/internal/convert"
 )
@@ -65,7 +75,7 @@ const (
 )
 
 func (pv *pageView) render(header string, width int, images map[string]image.Image) {
-	renderers := map[int]*glamour.TermRenderer{}
+	renderers := map[int]*fragmentRenderer{}
 	renderAt := func(md string, w int) []string {
 		r, ok := renderers[w]
 		if !ok {
@@ -114,10 +124,8 @@ func (pv *pageView) render(header string, width int, images map[string]image.Ima
 				lines = append(lines, segLines...)
 			}
 		}
-		// glamour never wraps code or wide tables; anything still overlong
-		// must be hard-wrapped here, because a single overflowing line
-		// flips the viewport into horizontal-cut mode and it starts
-		// truncating instead of wrapping
+		// Wrap once, after rendering, so Chinese text is not first moved
+		// around as oversized words by glamour's space-based wrapper.
 		lines = hardWrapOverflow(lines, w)
 		// empty blocks still occupy a line so the cursor can reach them
 		if len(lines) == 0 {
@@ -246,7 +254,42 @@ func hardWrapOverflow(lines []string, w int) []string {
 			out = append(out, l)
 			continue
 		}
-		out = append(out, strings.Split(wrap.String(l, w), "\n")...)
+		wrapped := ansi.Wrap(l, w, "")
+		if strings.ContainsFunc(ansi.Strip(l), isCJKEmphasisRune) {
+			wrapped = ansi.Hardwrap(l, w, true)
+		}
+		out = append(out, strings.Split(wrapped, "\n")...)
+	}
+	return selfContainedANSILines(out)
+}
+
+// Every display row must restore its own style: gutters, viewport clipping,
+// and terminal redraws can all reset the style between rows.
+func selfContainedANSILines(lines []string) []string {
+	active := ""
+	out := make([]string, len(lines))
+	for i, line := range lines {
+		prefix := active
+		var state byte
+		for rest := line; rest != ""; {
+			seq, _, n, next := ansi.DecodeSequence(rest, state, nil)
+			if n == 0 {
+				break
+			}
+			state = next
+			if strings.HasPrefix(seq, "\x1b[") && strings.HasSuffix(seq, "m") {
+				if seq == "\x1b[0m" || seq == "\x1b[m" {
+					active = ""
+				} else {
+					active += seq
+				}
+			}
+			rest = rest[n:]
+		}
+		out[i] = prefix + line
+		if active != "" {
+			out[i] += "\x1b[0m"
+		}
 	}
 	return out
 }
@@ -284,7 +327,17 @@ func initTheme() {
 	})
 }
 
-func newFragmentRenderer(width int) *glamour.TermRenderer {
+type fragmentRenderer struct{ md goldmark.Markdown }
+
+func (r *fragmentRenderer) Render(source string) (string, error) {
+	var b bytes.Buffer
+	if err := r.md.Convert([]byte(source), &b); err != nil {
+		return "", err
+	}
+	return b.String(), nil
+}
+
+func newFragmentRenderer(width int) *fragmentRenderer {
 	initTheme()
 	style := styles.DarkStyleConfig
 	if !darkBG {
@@ -297,12 +350,62 @@ func newFragmentRenderer(width int) *glamour.TermRenderer {
 	style.Document.Margin = &zero
 	style.Document.BlockPrefix = ""
 	style.Document.BlockSuffix = ""
-	r, err := glamour.NewTermRenderer(
-		glamour.WithStyles(style),
-		glamour.WithWordWrap(width),
+	md := goldmark.New(
+		goldmark.WithExtensions(extension.GFM, extension.DefinitionList),
+		goldmark.WithParserOptions(
+			parser.WithAutoHeadingID(),
+			parser.WithInlineParsers(util.Prioritized(cjkEmphasisParser{}, 450)),
+		),
 	)
-	if err != nil {
+	ar := glamouransi.NewRenderer(glamouransi.Options{
+		// The page view wraps the rendered text, with CJK-aware widths and
+		// self-contained styles on every row. Disable the earlier word wrap.
+		WordWrap:     0,
+		ColorProfile: termenv.TrueColor,
+		Styles:       style,
+	})
+	md.SetRenderer(renderer.NewRenderer(renderer.WithNodeRenderers(util.Prioritized(ar, 1000))))
+	return &fragmentRenderer{md: md}
+}
+
+type cjkEmphasisParser struct{}
+
+func (cjkEmphasisParser) Trigger() []byte { return []byte{'*'} }
+
+func (cjkEmphasisParser) Parse(parent ast.Node, block text.Reader, pc parser.Context) ast.Node {
+	before := block.PrecendingCharacter()
+	line, segment := block.PeekLine()
+	delimiter := parser.ScanDelimiter(line, before, 1, emphasisDelimiterProcessor{})
+	if delimiter == nil {
 		return nil
 	}
-	return r
+	after := rune(' ')
+	if delimiter.OriginalLength < len(line) {
+		after = util.ToRune(line, delimiter.OriginalLength)
+	}
+	if isCJKEmphasisRune(before) && unicode.IsPunct(after) {
+		delimiter.CanOpen = true
+	}
+	if unicode.IsPunct(before) && isCJKEmphasisRune(after) {
+		delimiter.CanClose = true
+	}
+	delimiter.Segment = segment.WithStop(segment.Start + delimiter.OriginalLength)
+	block.Advance(delimiter.OriginalLength)
+	pc.PushDelimiter(delimiter)
+	return delimiter
+}
+
+type emphasisDelimiterProcessor struct{}
+
+func (emphasisDelimiterProcessor) IsDelimiter(b byte) bool { return b == '*' }
+func (emphasisDelimiterProcessor) CanOpenCloser(opener, closer *parser.Delimiter) bool {
+	return opener.Char == closer.Char
+}
+func (emphasisDelimiterProcessor) OnMatch(consumes int) ast.Node { return ast.NewEmphasis(consumes) }
+
+func isCJKEmphasisRune(r rune) bool {
+	return unicode.Is(unicode.Han, r) ||
+		unicode.Is(unicode.Hiragana, r) ||
+		unicode.Is(unicode.Katakana, r) ||
+		unicode.Is(unicode.Hangul, r)
 }

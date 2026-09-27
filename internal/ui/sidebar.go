@@ -19,6 +19,17 @@ var (
 	selectedDescStyle  = lipgloss.NewStyle().Foreground(accentDimColor)
 )
 
+func withRecent(pages []notion.Page) []notion.Page {
+	out := make([]notion.Page, 0, len(pages)+1)
+	out = append(out, recentPage)
+	for _, p := range pages {
+		if p.ID != recentID {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 // pageDelegate renders sidebar rows itself so page icons can carry their own
 // colors — embedding ANSI inside the default delegate's styles would reset
 // the row styling mid-line.
@@ -46,6 +57,9 @@ func (pageDelegate) Render(w io.Writer, m list.Model, index int, item list.Item)
 
 	title := truncateText(it.page.Title, width-2)
 	edited := "edited " + relTime(it.page.LastEdited)
+	if it.page.ID == recentID {
+		edited = "recently modified pages"
+	}
 	if it.page.Kind == notion.KindDataSource {
 		edited = "database · " + edited
 	}

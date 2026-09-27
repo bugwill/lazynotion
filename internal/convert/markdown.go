@@ -246,25 +246,70 @@ func plain(rts []notionapi.RichText) string {
 
 func inline(rts []notionapi.RichText) string {
 	var b strings.Builder
-	for _, rt := range rts {
-		text := rt.PlainText
+	for i := 0; i < len(rts); {
+		rt := rts[i]
 		if rt.Type == "equation" && rt.Equation != nil {
 			b.WriteString("`" + rt.Equation.Expression + "`")
+			i++
 			continue
 		}
-		text = annotate(text, rt.Annotations)
-		if rt.Href != "" {
-			text = "[" + text + "](" + rt.Href + ")"
+
+		// Notion may split one annotated string into several rich-text
+		// fragments (including at its API length limit). Wrapping each
+		// fragment independently can produce adjacent delimiters such as
+		// **捕捉** **历史性** or **one****two**, which some Markdown
+		// renderers fail to treat as one strong span. Join neighboring runs
+		// with the same visible formatting before adding Markdown syntax.
+		end := i + 1
+		for end < len(rts) && sameInlineStyle(rt, rts[end]) {
+			end++
 		}
-		b.WriteString(text)
+		var text strings.Builder
+		for _, part := range rts[i:end] {
+			text.WriteString(part.PlainText)
+		}
+		rendered := annotate(text.String(), rt.Annotations)
+		if rt.Href != "" {
+			rendered = "[" + rendered + "](" + rt.Href + ")"
+		}
+		b.WriteString(rendered)
+		i = end
 	}
 	return b.String()
+}
+
+func sameInlineStyle(a, b notionapi.RichText) bool {
+	if b.Type == "equation" || a.Href != b.Href {
+		return false
+	}
+	return inlineAnnotationKey(a.Annotations) == inlineAnnotationKey(b.Annotations)
+}
+
+func inlineAnnotationKey(a *notionapi.Annotations) [5]bool {
+	if a == nil {
+		return [5]bool{}
+	}
+	return [5]bool{a.Bold, a.Italic, a.Strikethrough, a.Code, a.Underline}
 }
 
 func annotate(text string, a *notionapi.Annotations) string {
 	if a == nil {
 		return text
 	}
+	// Keep inline styles self-contained on each hard line. The viewer renders
+	// hard breaks one line at a time, so a marker opened before a newline would
+	// otherwise be parsed in a different fragment from its closing marker.
+	if strings.Contains(text, "\n") {
+		lines := strings.Split(text, "\n")
+		for i := range lines {
+			lines[i] = annotateLine(lines[i], a)
+		}
+		return strings.Join(lines, "\n")
+	}
+	return annotateLine(text, a)
+}
+
+func annotateLine(text string, a *notionapi.Annotations) string {
 	trimmed := strings.TrimLeft(text, " ")
 	lead := text[:len(text)-len(trimmed)]
 	core := strings.TrimRight(trimmed, " ")
